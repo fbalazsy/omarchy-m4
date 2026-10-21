@@ -1,0 +1,5 @@
+# m4 (gaps G7): start speakersafetyd for the J616 speaker card, as speakersafetyd's own 95-speakersafetyd.rules does for the Macs it
+# lists (J616 is not among them). Its rule already keeps PipeWire off the sense PCM (pcmC*D2c, ACP_IGNORE). The profile is
+# /usr/share/speakersafetyd/apple/j616.conf. Without the daemon the kernel keeps the speaker volumes locked at about -100 dB.
+# No DRIVERS== here: all parent keys of one rule must match the same parent, and the card id sits on card1, the driver on the platform device.
+SUBSYSTEM=="sound", KERNEL=="pcmC*D2c", ATTRS{id}=="AppleJ616", TAG+="systemd", ENV{SYSTEMD_WANTS}="speakersafetyd.service"

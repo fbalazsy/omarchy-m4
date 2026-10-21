@@ -1,0 +1,84 @@
+#!/usr/bin/python3 -IB
+"""pacman hooks 20-m4-hyprland-reload-pause.hook (PreTransaction) and 80-m4-hyprland-reload-resume.hook (PostTransaction) around
+a transaction that rewrites /usr/share/m4/hyprland.lua, the session's main Hyprland config. pacman replaces the file by removing
+it first; with auto-reload on, Hyprland's file watcher reloads in that moment, fails with "cannot open /usr/share/m4/hyprland.lua"
+and puts up its error bar (the running config stays unchanged: a failed reload keeps the old values).
+
+  pause   every running Hyprland (a socket at /run/user/<uid>/hypr/<instance>/.socket.sock) whose misc:disable_autoreload is
+          false gets it set to true, as its user; the instance is recorded in /run/m4/hyprland-reload-guard. An instance that
+          already has it true (the user's choice, or Omarchy's own guard paused it first) is left alone and not recorded.
+  resume  every recorded instance that still runs gets misc:disable_autoreload false again; the record is removed.
+
+The same pause as Omarchy's omarchy-hyprland-reload-guard (it covers only omarchy-settings), without its resume-time reload: a
+reload re-applies the monitor rule (the scale flip that makes the bar render too big). The new file applies at the next login.
+Never fails the transaction."""
+import json
+import os
+import pwd
+import subprocess
+import sys
+from pathlib import Path
+
+RUN = Path(os.environ.get('M4_RUN_USER', '/run/user'))         # tests point these at a fake tree
+STATE = Path(os.environ.get('M4_HYPR_GUARD_STATE', '/run/m4/hyprland-reload-guard'))
+OPTION = 'misc:disable_autoreload'
+
+
+def instances():
+    for sock in sorted(RUN.glob('*/hypr/*/.socket.sock')):
+        uid, sig = sock.parent.parent.parent.name, sock.parent.name
+        if uid.isdigit():
+            yield int(uid), sig
+
+
+def hyprctl(user, uid, sig, args, run):
+    argv = ['/usr/bin/runuser', '-u', user, '--', '/usr/bin/env', 'XDG_RUNTIME_DIR=%s' % (RUN/str(uid)),
+            'HYPRLAND_INSTANCE_SIGNATURE=%s' % sig, '/usr/bin/hyprctl', *args]
+    p = run(argv, capture_output=True, text=True, timeout=5)
+    return p.returncode, p.stdout
+
+
+def autoreload_disabled(user, uid, sig, run):
+    rc, out = hyprctl(user, uid, sig, ['-j', 'getoption', OPTION], run)
+    return json.loads(out)['bool'] if rc == 0 else None
+
+
+def set_disabled(user, uid, sig, value, run):
+    hyprctl(user, uid, sig, ['eval', 'hl.config({ misc = { disable_autoreload = %s } })' % ('true' if value else 'false')], run)
+
+
+def pause(run, getpwuid):
+    for uid, sig in instances():
+        try:
+            user = getpwuid(uid).pw_name
+            if autoreload_disabled(user, uid, sig, run) is not False:
+                continue
+            set_disabled(user, uid, sig, True, run)
+            if autoreload_disabled(user, uid, sig, run) is True:
+                STATE.mkdir(parents=True, exist_ok=True)
+                (STATE/sig).write_text('%d\n' % uid)
+                print('m4: paused Hyprland config auto-reload for %s while /usr/share/m4/hyprland.lua is replaced' % user)
+        except (KeyError, OSError, ValueError, subprocess.SubprocessError):
+            continue
+
+
+def resume(run, getpwuid):
+    for record in sorted(STATE.glob('*')) if STATE.is_dir() else []:
+        try:
+            uid, sig = int(record.read_text()), record.name
+            if (RUN/str(uid)/'hypr'/sig/'.socket.sock').exists():
+                user = getpwuid(uid).pw_name
+                set_disabled(user, uid, sig, False, run)
+                print('m4: resumed Hyprland config auto-reload for %s (no reload; the new file applies at the next login)' % user)
+        except (KeyError, OSError, ValueError, subprocess.SubprocessError):
+            pass
+        record.unlink(missing_ok=True)
+
+
+def main(argv=sys.argv, run=subprocess.run, getpwuid=pwd.getpwuid):
+    {'pause': pause, 'resume': resume}[argv[1]](run, getpwuid)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

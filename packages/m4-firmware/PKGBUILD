@@ -1,0 +1,32 @@
+# m4-firmware: the firmware files the M4 drivers load from /usr/lib/firmware. The files themselves are Apple/Broadcom firmware and
+# per-device calibration and are never in git: tools/collect-firmware.sh copies them from an installed system into userspace/firmware/.
+pkgname=m4-firmware
+pkgver=1.0
+pkgrel=3
+pkgdesc='Firmware for the Apple M4 (T6040 / J616s): BCM4388 Wi-Fi (brcmfmac) and Bluetooth, AOP ambient light calibration, front camera (IMX958) setfile, trackpad firmware'
+arch=(any)
+url='https://github.com/jgoyvaerts/omarchy-m4'
+license=('LicenseRef-Apple-firmware')
+# regulatory.db / regulatory.db.p7s are owned by wireless-regdb (CFG80211_REQUIRE_SIGNED_REGDB=y): not shipped here
+depends=(wireless-regdb)
+# 1.0-3 takes over apple/tpmtfw-j616s.bin, which the owner's Mac got by hand: upgrade that install once with
+# pacman -U --overwrite /usr/lib/firmware/apple/tpmtfw-j616s.bin
+optdepends=('avd-fw: the AVD video decoder firmware (usr/lib/firmware/apple/avd-fw-v5-t1.bin, owned by that package; m4-test avd)')
+
+prepare() {
+  rm -rf "$srcdir/tree" && cp -a "$startdir/../../userspace/firmware" "$srcdir/tree"
+}
+
+check() {
+  cd "$srcdir/tree"
+  # FIRMWARE.local.sha256: this machine's own files, written by tools/firmware-from-macos.sh
+  sums=FIRMWARE.sha256
+  [ -f FIRMWARE.local.sha256 ] && sums=FIRMWARE.local.sha256
+  sha256sum --quiet -c "$sums" || { echo "firmware files missing or different: run tools/collect-firmware.sh or tools/firmware-from-macos.sh" >&2; return 1; }
+}
+
+package() {
+  cd "$srcdir/tree"
+  cp -a usr "$pkgdir/"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

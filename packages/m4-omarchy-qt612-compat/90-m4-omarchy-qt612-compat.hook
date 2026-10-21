@@ -1,0 +1,16 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/share/omarchy/shell/*
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = m4-omarchy-qt612-compat
+
+[Action]
+Description = Pinning Omarchy shell QML to QtQuick 6.11 (Qt 6.12 Color name clash)...
+When = PostTransaction
+Exec = /usr/lib/m4-omarchy-qt612-compat/pin-qtquick --apply

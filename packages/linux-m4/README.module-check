@@ -1,0 +1,7 @@
+Tests that run in the linux-m4 PKGBUILD check() and by hand:
+
+  check-modules.py <builddir> --release <kernel release> [--expect-file expected-modules.txt]
+      ELF/loader validity of every module (one .modinfo with flags A, one this_module, no SHF_GNU_RETAIN,
+      vermagic) and the module list for the VM load test.
+  expected-modules.txt
+      Modules that must exist.

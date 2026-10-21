@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# m4-boot-mark: late hook, writes /boot/m4/boot-pending as soon as the root is mounted (see hooks/m4-boot-mark).
+
+build() {
+    add_binary sed
+    add_binary sync
+    add_binary mv
+    add_binary tr
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+Marks this boot as not yet complete: the loader boots its rescue set while /boot/m4/boot-pending exists. Written right after the root is
+mounted, so a failure of systemd, the drivers or the GPU leads to the rescue set at the next start. m4-boot-ok.service removes it again once
+the display manager has been up for 20 s. Skipped in a rescue (m4.safe) boot.
+HELPEOF
+}
+
+# vim: set ft=sh ts=4 sw=4 et:

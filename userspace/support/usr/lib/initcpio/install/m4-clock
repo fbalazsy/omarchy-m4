@@ -1,0 +1,17 @@
+#!/bin/bash
+# mkinitcpio build hook: early clock from the PMU's nvmem counter (the Mac has no RTC driver; the counter is in the SPMI PMU).
+
+build() {
+    add_binary /usr/bin/date
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+Sets the system clock in the initramfs from the Apple PMU counter (ADT spmi-abbeyL1: info-rtc at 0x2002, info-clock_offset at 0x2100,
+both 48-bit little endian, 32768 Hz counter ticks), exposed by the apple-spmi-nvmem driver. Does nothing and never fails the boot when
+the nvmem device is absent or the value is implausible: systemd's own clock restore then applies.
+HELPEOF
+}
+
+# vim: set ft=sh ts=4 sw=4 et:

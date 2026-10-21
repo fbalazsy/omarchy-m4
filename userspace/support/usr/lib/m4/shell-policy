@@ -1,0 +1,75 @@
+#!/usr/bin/python3 -I
+"""m4-shell-policy: keep two Omarchy shell plugins out of GPU sessions.
+
+Run by /usr/lib/m4/session-start as the user, before the session starts. When the private GPU driver is loaded (/run/m4/gpu-ready) it adds
+`omarchy.dropbox` and `omarchy.image-picker` to `disabledPlugins` in ~/.config/omarchy/shell.json and records exactly what it added in
+~/.local/state/m4/shell-policy.json; in a software session it removes exactly those entries again. Plugins the owner disabled themselves are never
+touched. A missing or unreadable shell.json is left alone.
+"""
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+PLUGINS = ('omarchy.dropbox', 'omarchy.image-picker')
+READY = Path('/run/m4/gpu-ready')
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(value, stream, indent=2)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.exists():
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def run(home, gpu):
+    shell = home/'.config/omarchy/shell.json'
+    state = home/'.local/state/m4/shell-policy.json'
+    try:
+        config = json.loads(shell.read_text())
+        disabled = list(config.get('disabledPlugins', []))
+        assert isinstance(config, dict) and all(isinstance(x, str) for x in disabled)
+    except (OSError, ValueError, AssertionError):
+        return 'no usable shell.json: nothing changed'
+    try:
+        added = [x for x in json.loads(state.read_text()).get('added', []) if x in PLUGINS]
+    except (OSError, ValueError, AttributeError):
+        added = []
+    if gpu:
+        new = [p for p in PLUGINS if p not in disabled]
+        if not new:
+            return 'GPU session: plugins already disabled'
+        write_json(state, {'added': sorted(set(added) | set(new))})      # intent first: a crash before the edit only leaves a note
+        config['disabledPlugins'] = disabled + new
+        write_json(shell, config)
+        return 'GPU session: disabled ' + ', '.join(new)
+    if not added:
+        return 'software session: nothing to restore'
+    config['disabledPlugins'] = [x for x in disabled if x not in added]
+    write_json(shell, config)
+    state.unlink(missing_ok=True)
+    return 'software session: restored ' + ', '.join(added)
+
+
+def main():
+    home = Path(os.environ.get('HOME', ''))
+    if not home.is_absolute() or os.geteuid() == 0:
+        print('m4-shell-policy: needs the user\'s HOME, not root', file=sys.stderr)
+        return 1
+    print('m4-shell-policy: ' + run(home, READY.exists()))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

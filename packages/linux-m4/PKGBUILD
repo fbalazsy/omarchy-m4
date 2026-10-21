@@ -1,0 +1,216 @@
+# Maintainer: M4 project (N1) <m4@localhost>
+#
+# NATIVE BUILD VARIANT (owner's disk); toolchain differences are reported, not refused.
+# linux-m4: Linux 7.1.12 for the Apple M4 Pro (T6040, J616s) on aurora-silicon's aurora-wip, with our M4 Pro support on top
+# (branch m4/aurora of ~/src/linux-m4-aurora-base; Gravity-based releases up to 7.1.13-45). Every module is in-tree. No initramfs is generated here: the m4-boot libalpm hook
+# (m4-support) writes /boot/m4 from /usr/lib/modules/$kver/{vmlinuz,dtb}.
+#
+# Build from scratch every time: the clone is reset and cleaned by makepkg, prepare() runs `make mrproper` and
+# build() refuses a source tree that already holds build products, so no stale object can be reused.
+
+pkgbase=linux-m4
+pkgname=("$pkgbase" "$pkgbase-headers")
+pkgver=7.1.12
+pkgrel=24
+pkgdesc='Linux kernel for the Apple M4 (T6040 / J616s)'
+url='https://github.com/jgoyvaerts/linux/tree/m4/aurora'
+arch=(aarch64)
+license=(GPL-2.0-only)
+makedepends=(
+  bc cpio gettext libelf pahole perl python tar xz zstd git dtc kmod openssl
+  rust rust-src rust-bindgen clang llvm lld
+)
+options=(!debug !strip)
+
+# The repository and the exact commit this package is built from (the release pins `commit=<sha>`).
+# bindgen 0.73.2 as packaged loses the alignment of zero-sized C structs (wrong Rust layouts); the corrected build
+# from aurora's tools/aurora-bindgen recipe passes the kernel's layout tests.
+_bindgen=${M4_BINDGEN:-$HOME/src/aurora-bindgen/rust-bindgen-0.73.2/target/release/bindgen}
+_repo=${M4_KERNEL_REPO:-https://github.com/jgoyvaerts/linux.git}
+_ref=${M4_KERNEL_REF:-commit=10fdf2f5b5e75e8aa01e6178a2707b9e6744aff6}   # jgoyvaerts/linux m4/aurora
+case $_repo in /*) _url="git+file://$_repo" ;; *) _url="git+$_repo" ;; esac
+source=("$pkgbase::$_url#$_ref" check-modules.py expected-modules.txt)
+sha256sums=(SKIP SKIP SKIP)
+
+# Toolchains the tree has been built and tested with. The kernel's own minimum checks
+# (scripts/min-tool-version.sh) still apply; anything else needs M4_ALLOW_UNTESTED_TOOLCHAIN=1.
+_tested_rustc=(1.99.0)
+_tested_bindgen=(0.73.2)
+_tested_gcc=(16.1.1)
+
+# RELEASE NAME RULE (N2): uname -r = $pkgver + CONFIG_LOCALVERSION ("-m4") + "." + $pkgrel, e.g. 7.1.13-m4.4 for pkgrel 4.
+# scripts/setlocalversion appends the environment LOCALVERSION to the release and, because it is set, suppresses the "+" suffix.
+# Every build therefore owns /usr/lib/modules/<release> and its vermagic: a module tree is never shared by two kernels.
+export LOCALVERSION=".$pkgrel"
+
+_kernelrelease() { make -s ARCH=arm64 kernelrelease; }
+
+prepare() {
+  cd "$pkgbase"
+
+  local v
+  v=$(rustc --version | awk '{print $2}')
+  if [[ ${M4_ALLOW_UNTESTED_TOOLCHAIN:-0} != 1 && " ${_tested_rustc[*]} " != *" $v "* ]]; then
+    warning "rustc $v differs from the tested toolchain (${_tested_rustc[*]}); building anyway (the result may not be byte-identical)"
+  fi
+  v=$("$_bindgen" --version | awk '{print $2}')
+  if [[ ${M4_ALLOW_UNTESTED_TOOLCHAIN:-0} != 1 && " ${_tested_bindgen[*]} " != *" $v "* ]]; then
+    warning "bindgen $v differs from the tested toolchain (${_tested_bindgen[*]}); building anyway (the result may not be byte-identical)"
+  fi
+  v=$(gcc -dumpfullversion)
+  if [[ ${M4_ALLOW_UNTESTED_TOOLCHAIN:-0} != 1 && " ${_tested_gcc[*]} " != *" $v "* ]]; then
+    warning "gcc $v differs from the tested toolchain (${_tested_gcc[*]}); building anyway (the result may not be byte-identical)"
+  fi
+  command -v ld.lld >/dev/null || warning "ld.lld (lld) not found; install lld if the build asks for it"
+
+  echo "Cleaning the source tree..."
+  git clean -xdfq
+  make ARCH=arm64 mrproper
+
+  echo "Configuring..."
+  make ARCH=arm64 m4_defconfig
+  make -s ARCH=arm64 BINDGEN="$_bindgen" rustavailable
+
+  # Config drift check: the fully resolved config must save back to exactly the committed defconfig. A symbol that
+  # changed because this host's toolchain or libraries offer something else (GCC plugins, ML-DSA, a compiler
+  # feature) would show up here instead of silently producing a different kernel.
+  make -s ARCH=arm64 savedefconfig
+  if ! diff -u arch/arm64/configs/m4_defconfig defconfig > "$srcdir/config-drift.diff"; then
+    error "config drift against arch/arm64/configs/m4_defconfig (see $srcdir/config-drift.diff)"
+    cat "$srcdir/config-drift.diff"
+    return 1
+  fi
+  _kernelrelease > version
+  echo "Release: $(<version)"
+  [[ $(<version) == "$pkgver-m4.$pkgrel" ]] || { error "release $(<version) is not $pkgver-m4.$pkgrel"; return 1; }
+}
+
+build() {
+  cd "$pkgbase"
+  # Reproducible identity: commit time and a fixed user/host; the build number is the package release.
+  local _ts
+  _ts=$(git log -1 --format=%cd --date=format:'%a %b %e %H:%M:%S UTC %Y')
+  export KBUILD_BUILD_TIMESTAMP="$_ts"
+  export KBUILD_BUILD_USER=m4 KBUILD_BUILD_HOST=m4-n1 KBUILD_BUILD_VERSION="$pkgrel"
+  make ARCH=arm64 BINDGEN="$_bindgen" -j"$(nproc)" Image modules dtbs
+}
+
+check() {
+  cd "$pkgbase"
+  local rel image limit=29949952
+  rel=$(<version)
+
+  echo "Image fits the loader's kernel window..."
+  image=$(stat -c %s arch/arm64/boot/Image)
+  (( image <= limit )) || { error "Image is $image bytes, window is $limit"; return 1; }
+
+  echo "Module ELF validity and expected module set..."
+  python3 "$srcdir/check-modules.py" . --release "$rel" \
+    --expect-file "$srcdir/expected-modules.txt" \
+    --base 070c8e4d43 --json "$srcdir/module-check.json" --loadtest "$srcdir/MODULES-LOADTEST.json"
+}
+
+_package() {
+  pkgdesc='Linux kernel and modules for the Apple M4 (T6040 / J616s)'
+  depends=(coreutils initramfs kmod)
+  optdepends=('wireless-regdb: regulatory database for cfg80211')
+
+  cd "$pkgbase"
+  local kernver modulesdir
+  kernver=$(<version)
+  modulesdir="$pkgdir/usr/lib/modules/$kernver"
+
+  echo "Installing boot image..."
+  install -Dm644 arch/arm64/boot/Image "$modulesdir/vmlinuz"
+  # the m4-boot hook and mkinitcpio find the owning package here
+  echo "$pkgbase" | install -Dm644 /dev/stdin "$modulesdir/pkgbase"
+
+  echo "Installing modules..."
+  # debug info out (INSTALL_MOD_STRIP=1 = strip --strip-debug; .symtab must stay, the loader relocates with it),
+  # then zstd-compressed like Arch kernels (CONFIG_MODULE_COMPRESS_ZSTD; CONFIG_MODULE_DECOMPRESS loads them)
+  ZSTD_CLEVEL=19 make ARCH=arm64 INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 DEPMOD=/doesnt/exist modules_install
+
+  echo "Installing devicetrees..."
+  # only the M4 boards; the loader hands the board's .dtb on as board.dtb
+  local dtb
+  for dtb in arch/arm64/boot/dts/apple/t6040-*.dtb arch/arm64/boot/dts/apple/t8132-*.dtb; do
+    [[ -f $dtb ]] && install -Dm644 "$dtb" "$modulesdir/dtb/apple/${dtb##*/}"
+  done
+
+  # the headers package owns build/
+  rm -f "$modulesdir"/{source,build}
+}
+
+_package-headers() {
+  pkgdesc="Headers and scripts for building modules for the $pkgbase kernel"
+  depends=(pahole)
+
+  cd "$pkgbase"
+  local builddir="$pkgdir/usr/lib/modules/$(<version)/build"
+
+  echo "Installing build files..."
+  install -Dt "$builddir" -m644 .config Makefile Module.symvers System.map version vmlinux
+  install -Dt "$builddir/kernel" -m644 kernel/Makefile
+  install -Dt "$builddir/arch/arm64" -m644 arch/arm64/Makefile
+  cp -t "$builddir" -a scripts
+  [[ -f tools/objtool/objtool ]] && install -Dt "$builddir/tools/objtool" tools/objtool/objtool
+  [[ -f tools/bpf/resolve_btfids/resolve_btfids ]] &&
+    install -Dt "$builddir/tools/bpf/resolve_btfids" tools/bpf/resolve_btfids/resolve_btfids
+
+  echo "Installing headers..."
+  cp -t "$builddir" -a include
+  cp -t "$builddir/arch/arm64" -a arch/arm64/include
+  install -Dt "$builddir/arch/arm64/kernel" -m644 arch/arm64/kernel/asm-offsets.s
+  install -Dt "$builddir/drivers/md" -m644 drivers/md/*.h
+  install -Dt "$builddir/net/mac80211" -m644 net/mac80211/*.h
+  install -Dt "$builddir/drivers/media/i2c" -m644 drivers/media/i2c/msp3400-driver.h
+  install -Dt "$builddir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
+  install -Dt "$builddir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
+  install -Dt "$builddir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
+  install -Dt "$builddir/drivers/iio/common/hid-sensors" -m644 drivers/iio/common/hid-sensors/*.h
+
+  # (no Rust metadata: it embeds the build directory; out-of-tree Rust modules are not supported)
+
+  echo "Installing Kconfig files..."
+  find . -name 'Kconfig*' -exec install -Dm644 {} "$builddir/{}" \;
+
+  echo "Removing unneeded architectures..."
+  local arch
+  for arch in "$builddir"/arch/*/; do
+    [[ $arch = */arm64/ ]] && continue
+    echo "Removing $(basename "$arch")"
+    rm -r "$arch"
+  done
+
+  echo "Removing documentation..."
+  rm -r "$builddir/Documentation"
+
+  echo "Removing broken symlinks..."
+  find -L "$builddir" -type l -printf 'Removing %P\n' -delete
+
+  echo "Removing loose objects..."
+  find "$builddir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+
+  echo "Stripping build tools..."
+  local file
+  while read -rd '' file; do
+    case "$(file -Sib "$file")" in
+      application/x-sharedlib\;*)  strip -v --strip-unneeded "$file" ;;
+      application/x-archive\;*)    strip -v --strip-debug "$file" ;;
+      application/x-executable\;*) strip -v "$file" ;;
+    esac
+  done < <(find "$builddir" -type f -perm -u+x ! -name vmlinux -print0)
+
+  echo "Adding symlink..."
+  mkdir -p "$pkgdir/usr/src"
+  ln -sr "$builddir" "$pkgdir/usr/src/$pkgbase"
+}
+
+for _p in "${pkgname[@]}"; do
+  eval "package_$_p() {
+    $(declare -f "_package${_p#$pkgbase}")
+    _package${_p#$pkgbase}
+  }"
+done
+
+# vim:set ts=8 sts=2 sw=2 et:

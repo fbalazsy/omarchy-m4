@@ -1,0 +1,14 @@
+# Before a transaction that rewrites /usr/share/m4/hyprland.lua (the session's main Hyprland config, `--config`): pause Hyprland's
+# config auto-reload. pacman replaces the file by removing it first; a reload in that moment fails with "cannot open
+# /usr/share/m4/hyprland.lua" and puts up the error bar. 80-m4-hyprland-reload-resume.hook turns it back on, without a reload.
+# 20-: after Omarchy's 10-omarchy-hyprland-reload-pause.hook, so when both run, Omarchy records the user's original setting.
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/share/m4/hyprland.lua
+
+[Action]
+Description = Pausing Hyprland config auto-reload while hyprland.lua is replaced...
+When = PreTransaction
+Exec = /usr/bin/python3 -IB /usr/lib/m4/hyprland-reload-guard pause

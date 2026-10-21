@@ -1,0 +1,15 @@
+#!/bin/sh
+# gpu-idle-power: set the GPU's idle power-off delay from the power source (G-13, 2026-10-19).
+# The firmware powers the GPU off 2 ms after its last job, and each wake-up then costs about 1.1 ms. Above 2 ms the kernel
+# (idle_off_delay_ms, linux-m4 7.1.12-12, m4/aurora dac421557) keeps the GPU powered that long after work instead: on AC 20 ms keeps every frame
+# of a 120 Hz desktop fast; on battery the firmware's own 2 ms saves power.
+# Optional /etc/m4/gpu-idle.conf: AC_MS=<1-1000> and BATTERY_MS=<1-1000> (one per line). Run by udev (charger change, GPU bind).
+ROOT=${M4_GPU_IDLE_ROOT:-}                     # tests point this at a fake tree
+AC_MS=20
+BATTERY_MS=2
+[ -r "$ROOT/etc/m4/gpu-idle.conf" ] && . "$ROOT/etc/m4/gpu-idle.conf"
+knob=$(ls "$ROOT"/sys/bus/platform/drivers/asahi/*/idle_off_delay_ms 2>/dev/null | head -1)
+[ -n "$knob" ] || exit 0                       # a kernel without the knob, or no GPU driver
+online=$(cat "$ROOT/sys/class/power_supply/macsmc-ac/online" 2>/dev/null || echo 1)
+if [ "$online" = 1 ]; then ms=$AC_MS; src=AC; else ms=$BATTERY_MS; src=battery; fi
+echo "$ms" > "$knob" && logger -t gpu-idle-power "$src: GPU idle power-off delay ${ms} ms"

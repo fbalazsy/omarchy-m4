@@ -1,0 +1,19 @@
+[Unit]
+Description=M4 Bluetooth: connect the configured headset after bluetoothd (retries, never blocks)
+ConditionFirmware=device-tree-compatible(apple,j616s)
+StartLimitIntervalSec=60
+StartLimitBurst=3
+ConditionKernelCommandLine=!m4.safe
+ConditionVirtualization=!container
+After=m4-boot-pending.service
+After=bluetooth.service
+Wants=bluetooth.service
+ConditionPathExists=/etc/m4/bluetooth.conf
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/m4/bt-connect
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

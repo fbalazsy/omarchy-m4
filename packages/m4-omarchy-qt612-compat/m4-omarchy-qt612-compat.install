@@ -1,0 +1,12 @@
+post_install() {
+  echo ">>> Restart the Omarchy shell to load the pinned QML: omarchy-restart-shell (or log out and in)."
+}
+post_upgrade() { post_install; }
+pre_remove() {
+  # reverts exactly the files the hook pinned (recorded in /var/lib/m4-omarchy-qt612-compat/pinned.list)
+  /usr/lib/m4-omarchy-qt612-compat/pin-qtquick --revert || true
+}
+post_remove() {
+  rmdir /var/lib/m4-omarchy-qt612-compat 2>/dev/null || true
+  echo ">>> Pin removed. On Qt 6.12 the Omarchy menu will be black again until Omarchy fixes its QML."
+}

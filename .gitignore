@@ -1,0 +1,18 @@
+# this machine's values (tools/make-local-conf.sh)
+/local.conf
+/private-patterns.txt
+# firmware: Apple/Broadcom files and per-device calibration (tools/collect-firmware.sh)
+/userspace/firmware/usr/lib/firmware/
+/userspace/firmware/FIRMWARE.local.sha256
+# build output
+packages/*/src/
+packages/*/pkg/
+packages/*/*.pkg.tar.*
+packages/*/*.tar.zst
+packages/*/*.log
+__pycache__/
+*.pyc
+# never: keys, journals, raw native evidence
+*.journal
+*.raw
+private/

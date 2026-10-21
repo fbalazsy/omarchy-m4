@@ -1,0 +1,40 @@
+#!/usr/bin/ash
+# m4-boot-mark (late hook): boot counting from the initramfs. If the root is mounted read-write and carries /boot/m4/loader.conf, write the
+# name of the entry that booted (/proc/device-tree/chosen/m4,boot-entry, else loader.conf's default) into /boot/m4/boot-pending and sync.
+# m4-boot-pending.service repeats it later (harmless). A rescue boot (m4.safe on the command line) writes nothing: the mark stays until the owner
+# clears it. The variables below are only overridden by the test.
+# shellcheck disable=SC3043
+
+m4_boot_mark() {
+    local root dt cmdline conf pending entry word tmp line
+    # mkinitcpio's init mounts the root at /sysroot ("$mount_handler" /sysroot) and defines no rootmnt; the test overrides the root
+    root=${m4_mark_root:-${rootmnt:-/sysroot}}
+    dt=${m4_mark_dt:-/proc/device-tree/chosen/m4,boot-entry}
+    cmdline=${m4_mark_cmdline:-/proc/cmdline}
+    conf=$root/boot/m4/loader.conf
+    pending=$root/boot/m4/boot-pending
+    line=$(cat "$cmdline" 2>/dev/null)
+    for word in $line; do
+        case $word in m4.safe|m4.safe=*) msg "m4-boot-mark: safe mode, boot-pending left as it is"; return 0 ;; esac
+    done
+    [ -f "$conf" ] || { msg "m4-boot-mark: no /boot/m4/loader.conf on the root, nothing marked"; return 0; }
+    entry=
+    [ -r "$dt" ] && entry=$(tr -d '\000' < "$dt" 2>/dev/null)
+    [ -n "$entry" ] || entry=$(sed -n 's/^default=//p' "$conf" 2>/dev/null | head -n 1)
+    case $entry in ''|*[!A-Za-z0-9._+-]*) entry=unknown ;; esac
+    tmp=$root/boot/m4/.boot-pending.tmp
+    if printf '%s\n' "$entry" > "$tmp" 2>/dev/null && mv "$tmp" "$pending" 2>/dev/null; then
+        sync
+        msg "m4-boot-mark: boot-pending written ($entry)"
+    else
+        rm -f "$tmp" 2>/dev/null
+        msg "m4-boot-mark: the root is read-only or /boot/m4 is not writable, nothing marked"
+    fi
+    return 0
+}
+
+run_latehook() {
+    m4_boot_mark
+}
+
+# vim: set ft=sh ts=4 sw=4 et:

@@ -1,0 +1,14 @@
+# Before linux-m4 is upgraded or removed: hard-link the module trees the loader's rescue kernel and every boot entry still need
+# (pacman removes a build's tree when a package with another kver replaces it). `m4-boot keep save` is idempotent: a killed transaction is repeated.
+# A failure aborts the transaction: losing the rescue kernel's modules is worse than not upgrading.
+[Trigger]
+Type = Package
+Operation = Upgrade
+Operation = Remove
+Target = linux-m4
+
+[Action]
+Description = Keeping the module trees of the rescue kernel and the boot entries...
+When = PreTransaction
+AbortOnFail
+Exec = /usr/bin/m4-boot keep save

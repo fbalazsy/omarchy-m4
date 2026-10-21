@@ -1,0 +1,5 @@
+# This machine's values. Copy to local.conf (gitignored) and fill in, or run tools/make-local-conf.sh on the M4 itself.
+# Package builds (makepkg) fill the @M4_*@ placeholders of the sources from local.conf. Never commit local.conf.
+# Both are optional: without them m4-support ships an empty /etc/m4/bluetooth.conf (no shared key, no headset connect).
+M4_BT_CONTROLLER=00:00:00:00:00:00                 # this Mac's Bluetooth controller address (shared by macOS and Linux)
+M4_BT_HEADSET=00:00:00:00:00:00                    # the paired headset that connects by itself (bluetoothctl devices)

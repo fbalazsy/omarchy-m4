@@ -1,0 +1,53 @@
+#!/usr/bin/python3 -I
+"""Safe-mode notice: when the loader booted its rescue set (/chosen m4,boot-source = rescue) say why and what to do.
+
+Runs once per login (user unit m4-safe-notice.service). The text is also printed, so it is in the journal and in `m4-boot status`."""
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+CHOSEN = Path('/proc/device-tree/chosen')
+REASONS = (('previous-boot-incomplete', 'the previous start did not finish (it never reached a stable desktop, or the power was cut)'),
+           ('ext4-dirty', 'the root file system was not shut down cleanly'),
+           ('no-loader-conf', 'the loader found no /boot/m4/loader.conf'),
+           ('bad-conf', 'loader.conf or the default entry.conf is malformed'),
+           ('bad-abi', 'the boot configuration has another ABI version'),
+           ('no-entry', 'the default boot entry does not exist'),
+           ('missing-file', 'a file of the default boot entry is missing'),
+           ('size-mismatch', 'a file of the default boot entry has a different size than entry.conf says'),
+           ('digest-mismatch', 'a file of the default boot entry fails its checksum'),
+           ('bad-image', 'the default entry kernel Image is not acceptable to the loader'),
+           ('too-large', 'the default entry kernel Image is larger than the loader window'),
+           ('bad-board-dtb', 'the loader could not use the entry board.dtb'),
+           ('bad-dtb', 'the default entry board.dtb is not a valid device tree'),
+           ('ssd-', 'the loader could not read the SSD'))
+
+
+def prop(name):
+    try:
+        return (CHOSEN/name).read_bytes().split(b'\0', 1)[0].decode('ascii', 'replace') or None
+    except OSError:
+        return None
+
+
+def main():
+    if prop('m4,boot-source') != 'rescue':
+        return 0
+    reason = prop('m4,boot-reason')
+    why = next((text for key, text in REASONS if reason and key in reason), 'the loader chose its rescue set (reason: %s)' % (reason or 'not reported'))
+    title = 'M4 started in safe mode'
+    body = ('Reason: %s.\nThe GPU, display, microphone and other private drivers were not loaded; this desktop is software-rendered.\n'
+            'Run `m4-boot status`. To start the normal system again: `sudo m4-boot select <entry>` (the entry is shown by `m4-boot list`).' % why)
+    print(title + '\n' + body, flush=True)
+    for _ in range(60):          # the notification daemon starts with the session; wait for it
+        p = subprocess.run(['/usr/bin/notify-send', '-u', 'critical', '-t', '0', '-a', 'm4', title, body], capture_output=True)
+        if p.returncode == 0:
+            return 0
+        time.sleep(2)
+    print('m4-safe-notice: no notification daemon answered', file=sys.stderr)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

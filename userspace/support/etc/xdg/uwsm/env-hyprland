@@ -1,0 +1,2 @@
+# m4-support: the private-Mesa session environment when the GPU driver loaded; nothing otherwise.
+[ -r /usr/lib/m4/session-env.sh ] && . /usr/lib/m4/session-env.sh

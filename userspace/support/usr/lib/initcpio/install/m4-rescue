@@ -1,0 +1,12 @@
+#!/bin/bash
+build() {
+    add_binary /usr/bin/chroot
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+Rescue behaviour: the root is mounted by the stock hooks. When /usr/lib/modules/$(uname -r) exists on it the system boots normally;
+otherwise the machine stops in a console with the root mounted at /sysroot and m4-rescue-chroot to reach m4-boot and pacman.
+HELPEOF
+}

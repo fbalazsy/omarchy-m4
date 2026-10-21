@@ -1,0 +1,140 @@
+#!/usr/bin/python3 -B
+"""Choose 120 Hz or 60 Hz on the internal panel of the M4 desktop. User command, no sudo.
+
+    m4-refresh-rate status      show the internal monitor and its modes
+    m4-refresh-rate 120         try 3456x2234@120; keeps it only if you type YES within 15 s, else back to 60 Hz
+    m4-refresh-rate 60          back to 3456x2234@60 at once
+
+Session-only: nothing is written to a config file, so the next login starts at the highest rate again (/usr/share/m4/hyprland.lua).
+The internal panel is named eDP-N only on the real display driver (simpledrm calls it Unknown-1), so on a normal
+boot this command refuses. A mode that does not come up (or a wrong readback) is reverted by the command itself.
+"""
+import json
+import re
+import select
+import subprocess
+import sys
+import time
+
+WIDTH, HEIGHT = 3456, 2234
+SCALE = 2
+KEEP_WINDOW_S = 15
+SETTLE_S = 3.0
+SAFE_RATE = 60
+
+
+def run(argv, timeout=15):
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return -1, '', str(error)
+    return p.returncode, p.stdout, p.stderr
+
+
+def monitors(runner):
+    rc, out, err = runner(['hyprctl', 'monitors', '-j'])
+    if rc != 0:
+        raise RuntimeError('hyprctl monitors failed: '+(err or out).strip()[-200:])
+    return json.loads(out)
+
+
+def internal(rows):
+    for row in rows:
+        if re.fullmatch(r'eDP-\d+', row.get('name', '')):
+            return row
+    return None
+
+
+def rates(row):
+    """Available refresh rates at the native size, from strings like '3456x2234@120.00Hz'."""
+    found = set()
+    for mode in row.get('availableModes', []):
+        match = re.fullmatch(r'(\d+)x(\d+)@([0-9.]+)Hz', mode)
+        if match and (int(match[1]), int(match[2])) == (WIDTH, HEIGHT):
+            found.add(round(float(match[3])))
+    return sorted(found)
+
+
+def apply(runner, name, rate):
+    rule = '%dx%d@%d' % (WIDTH, HEIGHT, rate)
+    lua = 'hl.monitor({ output = "%s", mode = "%s", position = "auto", scale = %d })' % (name, rule, SCALE)
+    rc, out, err = runner(['hyprctl', 'eval', lua])
+    text = (out+err).strip()
+    if rc == 0 and not re.search(r'\berror\b', text, re.I):
+        return True, text
+    # Older/other builds: the keyword form of the same rule.
+    rc2, out2, err2 = runner(['hyprctl', 'keyword', 'monitor', '%s,%s,auto,%d' % (name, rule, SCALE)])
+    return rc2 == 0 and 'error' not in (out2+err2).lower(), (out2+err2).strip() or text
+
+
+def current_rate(runner, name):
+    row = next((r for r in monitors(runner) if r.get('name') == name), None)
+    if row is None or row.get('disabled'):
+        return None
+    if (row.get('width'), row.get('height')) != (WIDTH, HEIGHT):
+        return None
+    return round(float(row.get('refreshRate', 0)))
+
+
+def ask_keep(read_line, seconds):
+    return (read_line(seconds) or '').strip().upper() == 'YES'
+
+
+def stdin_line(seconds):
+    ready, _, _ = select.select([sys.stdin], [], [], seconds)
+    return sys.stdin.readline() if ready else ''
+
+
+def main(argv=None, runner=run, read_line=stdin_line, sleep=time.sleep, out=print):
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) != 1 or argv[0] not in ('status', '120', '60'):
+        out('usage: refresh.py status|120|60')
+        return 2
+    try:
+        row = internal(monitors(runner))
+    except (RuntimeError, ValueError) as error:
+        out('Cannot read the monitors: %s (run this inside the desktop session)' % error)
+        return 1
+    if row is None:
+        out('No internal eDP monitor: this is not the real display driver (simpledrm). Nothing changed.')
+        return 1
+    name, available = row['name'], rates(row)
+    if argv[0] == 'status':
+        out('%s: %dx%d@%.2f Hz; native-size rates available: %s' % (
+            name, row.get('width', 0), row.get('height', 0), float(row.get('refreshRate', 0)),
+            ', '.join(str(r) for r in available) or 'none'))
+        return 0
+    want = int(argv[0])
+    if want not in available:
+        out('%d Hz is not offered by the driver at %dx%d (offered: %s). Nothing changed.' % (
+            want, WIDTH, HEIGHT, ', '.join(str(r) for r in available) or 'none'))
+        return 1
+    previous = round(float(row.get('refreshRate', SAFE_RATE))) if row.get('refreshRate') else SAFE_RATE
+    if previous == want:
+        out('Already at %d Hz.' % want)
+        return 0
+    ok, note = apply(runner, name, want)
+    sleep(SETTLE_S)
+    got = current_rate(runner, name) if ok else None
+    if not ok or got != want:
+        out('The %d Hz mode did not come up (readback %s). Going back to %d Hz.' % (want, got, SAFE_RATE if want != SAFE_RATE else previous))
+        apply(runner, name, SAFE_RATE if want != SAFE_RATE else previous)
+        sleep(SETTLE_S)
+        return 1
+    if want == SAFE_RATE:
+        out('Now at %d Hz.' % want)
+        return 0
+    out('')
+    out('Now at %d Hz. If you can read this, type YES and press Enter within %d seconds to keep it.' % (want, KEEP_WINDOW_S))
+    out('Anything else, or nothing: it goes back to %d Hz by itself.' % SAFE_RATE)
+    if ask_keep(read_line, KEEP_WINDOW_S):
+        out('Keeping %d Hz for this session.' % want)
+        return 0
+    apply(runner, name, SAFE_RATE)
+    sleep(SETTLE_S)
+    out('Back at %d Hz.' % SAFE_RATE)
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,41 @@
+#!/bin/sh
+# systemd-shutdown runs this after the unmounts: the root file system is the only one left and it is read-only. With mkinitcpio's `shutdown`
+# hook (m4's initramfs has it) systemd-shutdown then pivots into /run/initramfs, which unmounts the root completely before the final reboot(2);
+# this script is the evidence trail of the state systemd left it in.
+# The kernel does the rest (nvme-apple's shutdown callback runs the delayed flush and the controller shutdown). This only makes the SSD
+# state visible: the loader treats a root that is not clean as "boot the rescue set", so a power-off that left it dirty must show in the log.
+# It never blocks or changes the shutdown. $1 is poweroff, reboot, halt or kexec.
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export PATH
+action=${1:-unknown}
+
+say() {
+    printf '<6>m4-shutdown: %s\n' "$*" > /dev/kmsg 2>/dev/null || true
+}
+
+dev=$(findmnt -n -o SOURCE / 2>/dev/null)
+case $dev in
+    /dev/disk/*|/dev/nvme*) ;;
+    *) dev=/dev/block/$(mountpoint -d / 2>/dev/null) ;;
+esac
+
+sync
+timeout 10 sync -f / 2>/dev/null
+
+state=
+recovery=unknown
+if info=$(timeout 10 dumpe2fs -h "$dev" 2>/dev/null); then
+    state=$(printf '%s\n' "$info" | sed -n 's/^Filesystem state: *//p')
+    case $info in
+        *needs_recovery*) recovery=yes ;;
+        *) recovery=no ;;
+    esac
+fi
+
+if [ "$state" = clean ] && [ "$recovery" = no ]; then
+    say "$action: root $dev is clean (flushed)"
+else
+    say "$action: root $dev NOT clean: state='${state:-unreadable}' needs_recovery=$recovery"
+    printf 'M4_SHUTDOWN_NOT_CLEAN %s state=%s needs_recovery=%s\n' "$dev" "${state:-unreadable}" "$recovery" > /dev/console 2>/dev/null || true
+fi
+exit 0

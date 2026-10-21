@@ -1,0 +1,1 @@
+rw rootfstype=ext4 console=tty0 quiet loglevel=3 log_buf_len=4M plymouth.enable=0 systemd.show_status=error vt.global_cursor_default=0 vt.default_utf8=1 arm64.nowfxt panic=-1 systemd.tty.rows.console=139 systemd.tty.columns.console=432

@@ -1,0 +1,14 @@
+# After the transaction: put back what pacman removed from the kept trees and run depmod on them (after the distribution's 10-linux-modules-post,
+# before 60-depmod and 90-m4-boot). Also runs for m4-support so a transaction that was killed after its removals is healed by the next one.
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = linux-m4
+Target = m4-support
+
+[Action]
+Description = Restoring the module trees of the rescue kernel and the boot entries...
+When = PostTransaction
+Exec = /usr/bin/m4-boot keep restore

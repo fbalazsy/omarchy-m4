@@ -1,0 +1,49 @@
+#!/usr/bin/python3 -I
+"""m4-sensors: print the SMC temperature, fan and power readings the SMC hwmon driver (macsmc_hwmon) exposes. Read only, no options."""
+import sys
+from pathlib import Path
+
+
+def read(path):
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def main():
+    rows = 0
+    for chip in sorted(Path('/sys/class/hwmon').glob('hwmon*')):
+        name = read(chip/'name') or chip.name
+        print('%s (%s)' % (name, chip.name))
+        for path in sorted(chip.iterdir()):
+            n = path.name
+            if not n.endswith('_input'):
+                continue
+            value = read(path)
+            if value is None or not value.lstrip('-').isdigit():
+                continue
+            label = read(chip/n.replace('_input', '_label')) or n.replace('_input', '')
+            number = int(value)
+            if n.startswith('temp'):
+                text = '%.1f C' % (number/1000)
+            elif n.startswith('fan'):
+                text = '%d rpm' % number
+            elif n.startswith('power'):
+                text = '%.2f W' % (number/1e6)
+            elif n.startswith('in'):
+                text = '%.3f V' % (number/1000)
+            elif n.startswith('curr'):
+                text = '%.3f A' % (number/1000)
+            else:
+                text = value
+            print('  %-28s %s' % (label, text))
+            rows += 1
+    if not rows:
+        print('no hwmon readings: macsmc_hwmon is not bound (it autoloads; a rescue boot leaves it out)', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

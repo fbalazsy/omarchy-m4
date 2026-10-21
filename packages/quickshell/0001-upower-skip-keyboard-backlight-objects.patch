@@ -1,0 +1,17 @@
+--- a/src/services/upower/core.cpp	2026-10-08 08:42:54.000000000 +0000
++++ b/src/services/upower/core.cpp	2026-10-14 03:51:35.008921957 +0000
+@@ -135,6 +135,14 @@
+ }
+ 
+ void UPower::registerDevice(const QString& path) {
++	// UPower exposes the keyboard backlight objects next to the devices; they do not
++	// implement org.freedesktop.UPower.Device, so a GetAll on them only logs errors.
++	if (path == QStringLiteral("/org/freedesktop/UPower/KbdBacklight")
++	    || path == QStringLiteral("/org/freedesktop/UPower/KbdBacklight/kbd_backlight")) {
++		qCDebug(logUPower) << "Skipping keyboard backlight object" << path;
++		return;
++	}
++
+ 	if (this->mDevices.contains(path)) {
+ 		qCDebug(logUPower) << "Skipping duplicate registration of UPowerDevice" << path;
+ 		return;

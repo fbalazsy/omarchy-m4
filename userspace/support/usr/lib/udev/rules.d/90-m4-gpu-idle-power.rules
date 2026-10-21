@@ -1,0 +1,3 @@
+# GPU idle power-off delay follows the power source (gpu-idle-power, G-13).
+SUBSYSTEM=="power_supply", KERNEL=="macsmc-ac", ACTION=="add|change", RUN+="/usr/lib/m4/gpu-idle-power"
+SUBSYSTEM=="platform", DRIVER=="asahi", ACTION=="bind", RUN+="/usr/lib/m4/gpu-idle-power"

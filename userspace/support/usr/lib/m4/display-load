@@ -1,0 +1,19 @@
+#!/bin/sh
+# m4-display.service: take the panel over from simpledrm with the display driver. Skipped (simpledrm stays) when the GPU driver is not
+# ready or the load fails; the exit status is always 0.
+mkdir -p /run/m4
+rm -f /run/m4/display-ready /run/m4/display-failed
+skip() {
+    printf '%s\n' "$1" > /run/m4/display-failed
+    echo "M4_DISPLAY_SKIPPED $1"
+    exit 0
+}
+[ -e /run/m4/gpu-ready ] || skip "the GPU driver is not ready: simpledrm stays"
+/usr/bin/modprobe -v appledrm || skip "modprobe appledrm failed (status $?): simpledrm stays"
+# Only the display's own card has to be ready for SDDM: a global settle waited 1.7-2.0 s for unrelated coldplug events.
+/usr/bin/udevadm wait --timeout=20 /dev/dri/by-path/platform-display-subsystem-card ||
+    skip "the display card did not appear within 20 s: simpledrm stays"
+[ -d /sys/module/appledrm ] || skip "appledrm is not loaded after modprobe"
+printf 'ok\n' > /run/m4/display-ready
+echo "M4_DISPLAY_READY"
+exit 0

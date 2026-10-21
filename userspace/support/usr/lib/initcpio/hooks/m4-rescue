@@ -1,0 +1,20 @@
+#!/usr/bin/ash
+# m4-rescue (late hook): decide between "boot the real system" and "stop in a rescue console".
+run_latehook() {
+    # shellcheck disable=SC3043  # busybox ash (the initramfs shell) has local
+    local kver
+    kver=$(uname -r)
+    if [ -d "/new_root/usr/lib/modules/$kver" ] || [ -d "/sysroot/usr/lib/modules/$kver" ]; then
+        msg ":: m4-rescue: kernel modules of $kver found on the root, booting the system"
+        return 0
+    fi
+    msg ":: m4-rescue: /usr/lib/modules/$kver is missing on the root: stopping in the rescue console"
+    msg "   the root is mounted at /sysroot; reinstall the kernel with: m4-rescue-chroot, then pacman -S linux-m4 (m4-boot writes /boot/m4)"
+    cat > /bin/m4-rescue-chroot <<'EOS'
+#!/bin/sh
+for d in proc sys dev run; do mount --rbind "/$d" "/sysroot/$d" 2>/dev/null; done
+exec chroot /sysroot /bin/bash
+EOS
+    chmod 755 /bin/m4-rescue-chroot
+    launch_interactive_shell
+}

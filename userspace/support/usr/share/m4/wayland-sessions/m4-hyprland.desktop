@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Hyprland (M4)
+Comment=Hyprland on the M4 GPU stack (Omarchy, UWSM)
+Exec=/usr/lib/m4/session-start
+Type=Application
+DesktopNames=Hyprland:M4

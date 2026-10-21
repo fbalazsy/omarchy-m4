@@ -1,0 +1,20 @@
+# Maintainer: M4 project (lane S, R52)
+pkgname=m4-omarchy-qt612-compat
+pkgver=1.0
+pkgrel=3
+pkgdesc='Pins the Omarchy shell QML to QtQuick 6.11 so Qt 6.12 QtQuick.Color does not shadow qs.Commons.Color'
+arch=(any)
+url='https://omarchy.org'
+license=(MIT)
+depends=(python)
+install=$pkgname.install
+source=(pin-qtquick 90-m4-omarchy-qt612-compat.hook LICENSE)
+sha256sums=('6caae1c7729469765d152f69b2e5fe2ce4b0b313c06594d4bd2b7d8f6dd1a7a2'
+            '18f0cd9ed38f82d75dac122ffeb2a2b2b3b34ab41e4ae2ae7d266efa35ef283a'
+            '1b9af9ad089bb66f832aad1408de1941d8aa2789544d89b55f52af94a5c842df')
+
+package() {
+	install -Dm755 pin-qtquick "$pkgdir/usr/lib/$pkgname/pin-qtquick"
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 90-m4-omarchy-qt612-compat.hook "$pkgdir/usr/share/libalpm/hooks/90-m4-omarchy-qt612-compat.hook"
+}

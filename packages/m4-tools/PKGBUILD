@@ -1,0 +1,34 @@
+# m4-tools: attended hardware tests (m4-test) and small tools. Built from userspace/tools.
+pkgname=m4-tools
+pkgver=1.0
+pkgrel=21
+pkgdesc='M4 (Apple T6040 / J616s) attended hardware tests (m4-test) and small tools'
+arch=(aarch64)
+url='https://github.com/jgoyvaerts/omarchy-m4'
+license=(GPL-2.0-only)
+depends=(python systemd m4-support)
+makedepends=(gcc linux-api-headers)
+optdepends=('gst-plugins-bad-libs: v4l2codecs for m4-test avd'
+            'avd-fw: the AVD firmware file m4-test avd pins (owned by it, pacman -Qkk clean)'
+            'mpv: the display-pacing workload'
+            'bluez-utils: m4-test bluetooth')
+
+prepare() {
+  local top="$startdir/../.."
+  rm -rf "$srcdir/tree" && cp -a "$top/userspace/tools" "$srcdir/tree"
+}
+
+build() {
+  cd "$srcdir/tree"
+  gcc -O2 -static -pthread -o cpu-memory src/cpu-memory.c
+  gcc -O2 -static -o cpu-context src/cpu-context.c src/cpu-context.S
+}
+
+package() {
+  cd "$srcdir/tree"
+  cp -a usr "$pkgdir/"
+  local t="$pkgdir/usr/lib/m4/tests"
+  install -Dm755 cpu-memory "$t/cpu-memory/cpu-memory"
+  install -Dm755 cpu-context "$t/cpu-memory/cpu-context"
+  find "$pkgdir" -name __pycache__ -prune -exec rm -rf {} +
+}

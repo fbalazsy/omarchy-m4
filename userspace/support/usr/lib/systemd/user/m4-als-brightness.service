@@ -1,0 +1,16 @@
+[Unit]
+Description=M4 ambient light: screen and keyboard brightness (on by default; off: systemctl --user mask --now m4-als-brightness)
+ConditionKernelCommandLine=!m4.safe
+ConditionVirtualization=!container
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -B /usr/lib/m4/als-brightness.py
+Restart=on-failure
+RestartSec=30
+Nice=10
+
+[Install]
+WantedBy=graphical-session.target

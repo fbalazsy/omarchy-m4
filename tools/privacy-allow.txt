@@ -1,0 +1,9 @@
+# Exact matches that look private but are not (placeholders, examples, public upstream contacts). One per line.
+00:00:00:00:00:00
+AA:BB:CC:DD:EE:FF
+00000000-0000-0000-0000-000000000000
+caleb@alerque.com
+/home/x
+megi@xff.cz
+0FC63DAF-8483-4772-8E79-3D69D8477DE4
+00000000-0000-0000-0000-000000000002

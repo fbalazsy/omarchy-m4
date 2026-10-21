@@ -1,0 +1,47 @@
+#!/bin/sh
+# m4-gpu.service: make sure aurora's GPU driver (asahi) is up and give the greeter aurora's Mesa (m4-aurora-mesa, /opt/aurora-mesa).
+# Every outcome is recorded in /run/m4; the exit status is always 0 so nothing downstream fails and the greeter simply starts in software
+# when the driver did not come up. The session and greeter environments are m4-aurora-mesa's files: /usr/lib/m4/{session,greeter}-env link to them.
+O=/opt/aurora-mesa
+mkdir -p /run/m4
+rm -f /run/m4/gpu-ready /run/m4/gpu-failed
+# the GPU-only greeter configuration (aurora's Mesa for the Qt greeter, the tested theme) exists only while the driver is up
+SDDM_GPU=/etc/sddm.conf.d/zz-m4-gpu.conf
+rm -f "$SDDM_GPU"
+fail() {
+    printf '%s\n' "$1" > /run/m4/gpu-failed
+    echo "M4_GPU_FAILED $1"
+    exit 0
+}
+for f in /usr/lib/m4/session-env /usr/lib/m4/greeter-env "$O/sddm-gpu-aurora.conf"; do
+    [ -r "$f" ] || fail "$f is missing (is m4-aurora-mesa installed?)"
+done
+# -b: `blacklist asahi` under /etc/modprobe.d is the kill switch, also for this explicit load
+if grep -qs 'apple,agx-t6040' /sys/bus/platform/devices/*/of_node/compatible; then
+    # The GPU is a device (7.1.12-m4.10 enables its node): asahi autoloads and binds without parameters. Never reload it here:
+    # t6040_attach=1 fails with -EBUSY and an unload tears down a working GPU.
+    /usr/bin/modprobe -bv asahi || fail "modprobe asahi failed (status $?)"
+else
+    # The rollbacks 7.1.12-m4.7/m4.9 keep the node disabled: asahi may have loaded without t6040_attach (it then stays inert),
+    # so reload it with the parameter, which creates the device.
+    /usr/bin/modprobe -r asahi 2>/dev/null
+    # --ignore-install: the m4.conf install rule would drop the parameter (m4-gpu.service never runs on m4.safe)
+    /usr/bin/modprobe -bv --ignore-install asahi t6040_attach=1 || fail "modprobe asahi t6040_attach=1 failed (status $?)"
+fi
+[ -d /sys/module/asahi ] || fail "asahi is not loaded (blacklisted under /etc/modprobe.d?)"
+node=
+i=0
+while [ "$i" -lt 60 ]; do
+    for n in /sys/class/drm/renderD*; do
+        [ "$(basename "$(readlink -f "$n/device/driver" 2>/dev/null)")" = asahi ] && node=$n && break 2
+    done
+    sleep 0.5
+    i=$((i + 1))
+done
+[ -n "$node" ] || fail "asahi loaded but no render node appeared within 30 s"
+mkdir -p /etc/sddm.conf.d
+ln -sf "$O/sddm-gpu-aurora.conf" "$SDDM_GPU"
+# m4-boot's boot-ok check keys on the word "aurora"
+printf 'ok aurora\n' > /run/m4/gpu-ready
+echo "M4_GPU_READY (aurora, $(basename "$node"))"
+exit 0

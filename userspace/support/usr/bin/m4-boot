@@ -1,0 +1,1044 @@
+#!/usr/bin/python3 -I
+"""m4-boot: write and manage /boot/m4 (Boot ABI v1) for the M4 loader.
+
+  m4-boot install [--kver K] [--no-default]   build the initramfs and write a new entry; make it the default
+  m4-boot list                                entries, the default, sizes, whether each verifies
+  m4-boot status                              the default entry, what the loader will do with it, and why this boot was a rescue boot
+  m4-boot select ENTRY                        make an existing entry the default (also clears a pending boot)
+  m4-boot clear                               clear `boot-pending` without changing the default (retry the default entry)
+  m4-boot pending set|ok                      the boot counter (m4-boot-pending.service / m4-boot-ok.service; see below)
+  m4-boot rollback                            select the previous entry
+  m4-boot prune                               keep the default and the previous entry only
+  m4-boot rescue --out FILE [--kver K]        build the rescue initramfs (the loader embeds it)
+  m4-boot keep save|restore|list              module trees that survive a linux-m4 upgrade (the libalpm hooks of m4-support call save and restore)
+
+Only this tool writes /boot/m4. An entry is written under a temporary name, its files and the directory are fsynced, it is renamed into
+place, and only then `loader.conf` is replaced the same way: a power cut leaves the old default intact. The entry's command line is
+/etc/m4/cmdline, else the package's /usr/share/m4/cmdline; a file without `root=` gets `root=UUID=` of the file system this tool runs on, asked
+of the kernel, so one package serves every root (this one, HP, an install in a chroot or a container). A kernel package can list words its
+kernel must not get in /usr/lib/modules/<kver>/cmdline-drop; they are left out of that kernel's entry only. The loader refuses an entry whose
+sizes or hashes differ and boots its embedded rescue set instead. `install` and `prune` first sweep what an earlier killed run left behind
+(the `m4-boot-*` work directories of /boot/m4 and `entries/.tmp-*`); `install` runs `depmod -a KVER` before building the initramfs when the
+kernel's modules.dep is missing or older than its modules (a package transaction that was cut short never ran its depmod hook).
+
+One entry per kernel (N3): `install` of a kver that already has an entry rebuilds THAT entry in place (a temporary directory, verified, then
+exchanged with the old one atomically) and keeps its name; it never mints `<kver>.N`. Every m4-support upgrade fires the package's install hook, and the
+second entry for the same kver used to push the rollback entry out. `prune` keeps the default, the newest entry of another kver (the rollback) and the
+rescue kver's entry while its module tree exists; it drops same-kver duplicates.
+
+Boot-OK (N3/C): when /run/m4/gpu-ready exists the display manager being up for 20 s is not enough: the greeter must also have been given a GPU
+slot (the kernel log of this boot holds the driver's `render-reuse adopted slot=N uid=<sddm uid>` line) and the driver must not have said
+`submit rejected`. A black greeter used to pass the old rule and cleared the mark. Without the GPU the old rule stands.
+
+Kept module trees (N2/K2, N3): every entry boots a kernel whose modules the root file system must hold, but `pacman -U linux-m4` of another
+build removes the old build's tree. (The rescue kernel's tree, /usr/lib/modules/<rescue-kver>, is the package linux-m4-rescue's since N3; it is no
+longer kept here.) `keep save` (libalpm PreTransaction, before a linux-m4 upgrade or removal) hard-links
+the trees of every entry's kver into /usr/lib/modules/.m4-keep; `keep restore` (PostTransaction, and
+the start of `install`/`prune`, so a killed transaction heals itself) links back whatever pacman removed, runs `depmod -a KVER` and records the
+tree in /var/lib/m4/kept-trees. `prune` (and `install`, which prunes) deletes recorded trees that are neither the rescue kver, nor an entry's kver,
+nor the running kernel, nor owned by a package again.
+
+Boot counting: the loader cannot write, so Linux does. `pending set` (early in boot, before any hardware-loading unit) writes
+`/boot/m4/boot-pending` with this boot's entry name and fsyncs the file and the directory; `pending ok` removes it once the display manager has been
+active for 20 s. While the file exists the loader boots its rescue set (reason `previous-boot-incomplete`). A rescue boot (`m4.safe` on the command
+line) touches nothing: the file stays until the owner runs `m4-boot select ENTRY`, `m4-boot clear` or installs a kernel, so a failing entry is
+never retried by itself.
+
+Exit: 0 ok, 1 refused (nothing changed), 2 usage.
+"""
+import argparse
+import ctypes
+import fcntl
+import gzip
+import hashlib
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+import zlib
+from pathlib import Path
+
+ABI = 1
+NAME = re.compile(r'^[A-Za-z0-9_+-][A-Za-z0-9._+-]{0,62}$')    # Boot ABI v1: [A-Za-z0-9._+-]{1,63}, not starting with '.', no '..'
+IMAGE_MAX = 29949952
+INITRAMFS_MAX = 16 * 1024 * 1024
+DTB_MAX = 36864                # loader rev 11: the final tree must fit 64 KiB after the loader adds ~27 KB
+DTB_MAX_REV11 = 36864          # the window when the loader publishes none (rev 11 has no /chosen/m4,board-dtb-max)
+DTB_MAX_NO_LOADER = 98304      # not booted by our loader (a chroot on another system): every loader since rev 12 takes 98,304
+DTB_MAX_CEILING = 131072       # the loader's FDT slot (rev 12: 128 KiB); a published value above it is not believed
+CMDLINE_MAX = 1024
+FS_IOC_GETFSUUID = 0x80111500                   # _IOR(0x15, 0, struct fsuuid2 { __u8 len; __u8 uuid[16]; })
+LOADER_CONF_MAX = 4096
+FILES = ('Image', 'initramfs.img', 'board.dtb')    # entry.conf keys: <file>_size, <file>_crc32 (verified by the loader), <file>_sha256 (verified here)
+DEFAULT_CMDLINE = '/etc/m4/cmdline'
+PACKAGE_CMDLINE = '/usr/share/m4/cmdline'
+MKINITCPIO_CONF = '/etc/m4/mkinitcpio.conf'
+RESCUE_CONF = '/usr/share/m4/rescue-mkinitcpio.conf'
+ABI_CONF = '/usr/share/m4/abi.conf'          # optional overrides of the window limits (lane L sets dtb_max)
+DTB_REL = 'dtb/apple/t6040-j616s.dtb'
+PENDING = 'boot-pending'
+CHOSEN = '/proc/device-tree/chosen'
+PROC_CMDLINE = '/proc/cmdline'
+CMDLINE_DROP = 'cmdline-drop'       # in a kernel's module tree: command-line words that kernel must not get
+OK_SECONDS = 20
+OK_TIMEOUT = 900
+GPU_READY = '/run/m4/gpu-ready'
+GREETER_GRACE = 15                              # seconds after the display manager's 20 s: the greeter's adoption line may still be a moment away
+ADOPTED = 'render-reuse adopted'
+REJECTED = 'submit rejected'
+# aurora's G17 driver (asahi.ko, aurora mode) logs this when a client's GPU work fails.
+AURORA_FAILED = 'GPU work of a client failed'
+SDDM_CONF = '/etc/sddm.conf'
+SDDM_CONF_DIR = '/etc/sddm.conf.d'
+RESCUE_KVER_FILE = '/usr/lib/m4/rescue-kver'
+KEEP_DIR = '.m4-keep'                           # under the modules directory: hard-linked copies between PreTransaction and PostTransaction
+KEPT_LIST = '/var/lib/m4/kept-trees'            # kvers whose tree this tool restored (unowned by any package): the only trees prune may delete
+KEEP_SKIP = ('build',)                          # the headers package's symlink: dangling without it, not needed to boot
+WORK_PREFIX = 'm4-boot-'
+WORK_NAME = re.compile(r'^m4-boot-[a-z0-9_]{8}$')    # tempfile.TemporaryDirectory(prefix=WORK_PREFIX): a killed install leaves one (~18 MB)
+MODULE_SUFFIXES = ('.ko', '.ko.zst', '.ko.xz', '.ko.gz')
+
+
+class Refused(Exception):
+    pass
+
+
+def valid_name(name):
+    return bool(NAME.match(name)) and '..' not in name
+
+
+def need(ok, message):
+    if not ok:
+        raise Refused(message)
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def crc32_file(path):
+    value = 0
+    with open(path, 'rb') as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b''):
+            value = zlib.crc32(chunk, value)
+    return '%08x' % (value & 0xffffffff)
+
+
+def fsync_path(path, directory=False):
+    fd = os.open(path, os.O_RDONLY | (os.O_DIRECTORY if directory else 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_atomic(path, data):
+    """tmp file in the same directory, fsync, rename, fsync the directory."""
+    path = Path(path)
+    tmp = path.with_name('.' + path.name + '.tmp')
+    with open(tmp, 'wb') as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(tmp, path)
+    fsync_path(path.parent, directory=True)
+
+
+def exchange_dirs(a, b):
+    """Atomically exchange two directories (renameat2 RENAME_EXCHANGE). False when the file system or libc cannot."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.renameat2(-100, os.fsencode(str(a)), -100, os.fsencode(str(b)), 2) == 0
+    except (OSError, AttributeError):
+        return False
+
+
+def parse_conf(text):
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith('#') and '=' in line:
+            key, _, value = line.partition('=')
+            out[key.strip()] = value.strip()
+    return out
+
+
+def board_dtb_max(chosen=CHOSEN):
+    """The running loader's own board.dtb limit: /chosen/m4,board-dtb-max, a big-endian u32 (loader rev 12 publishes 98,304).
+    None when absent (rev 11) or not a plausible value. Loader changes need Recovery, so the next boot's loader is this one."""
+    try:
+        raw = (Path(chosen)/'m4,board-dtb-max').read_bytes()
+    except OSError:
+        return None
+    if len(raw) != 4:
+        return None
+    value = int.from_bytes(raw, 'big')
+    return value if 0 < value <= DTB_MAX_CEILING else None
+
+
+def limits(conf=None, chosen=CHOSEN):
+    """The window limits: the board.dtb limit the loader publishes (else rev 11's 36,864, or rev 12's 98,304 when no
+    loader of ours booted this system), then abi.conf's explicit overrides."""
+    global IMAGE_MAX, INITRAMFS_MAX, DTB_MAX
+    published = board_dtb_max(chosen)
+    if published is not None:
+        DTB_MAX = published
+    else:
+        DTB_MAX = DTB_MAX_REV11 if (Path(chosen)/'m4,loader-version').exists() else DTB_MAX_NO_LOADER
+    try:
+        values = parse_conf(Path(conf or ABI_CONF).read_text())
+    except OSError:
+        return
+    IMAGE_MAX = int(values.get('image_max', IMAGE_MAX))
+    INITRAMFS_MAX = int(values.get('initramfs_max', INITRAMFS_MAX))
+    DTB_MAX = int(values.get('dtb_max', DTB_MAX))
+
+
+def dt_string(name, chosen=CHOSEN):
+    """A NUL-terminated string property of /chosen (the loader's m4,boot-* properties), or None."""
+    try:
+        raw = (Path(chosen)/name).read_bytes()
+    except OSError:
+        return None
+    return raw.split(b'\0', 1)[0].decode('ascii', 'replace') or None
+
+
+def safe_mode(cmdline=PROC_CMDLINE):
+    try:
+        words = Path(cmdline).read_text().split()
+    except OSError:
+        return False
+    return any(w == 'm4.safe' or w.startswith('m4.safe=') for w in words)
+
+
+def fs_uuid(path='/'):
+    """The UUID of the file system holding `path`, from the kernel (FS_IOC_GETFSUUID). It needs no udev database and no block device,
+    so a chroot or a container names its own root, never the host's."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            raw = bytearray(17)
+            fcntl.ioctl(fd, FS_IOC_GETFSUUID, raw)
+        finally:
+            os.close(fd)
+    except OSError as e:
+        raise Refused('cannot read the file system UUID of %s: %s' % (path, e.strerror))
+    need(raw[0] == 16, '%s: the file system UUID is %d bytes, not 16' % (path, raw[0]))
+    return str(uuid.UUID(bytes=bytes(raw[1:17])))
+
+
+REASONS = (('previous-boot-incomplete', 'the previous start did not finish (it never reached a stable desktop, or the power was cut)'),
+           ('ext4-dirty', 'the root file system was not shut down cleanly'),
+           ('no-loader-conf', 'the loader found no /boot/m4/loader.conf'),
+           ('bad-conf', 'loader.conf or the default entry.conf is malformed'),
+           ('bad-abi', 'the boot configuration has another ABI version'),
+           ('no-entry', 'the default boot entry does not exist'),
+           ('missing-file', 'a file of the default boot entry is missing'),
+           ('size-mismatch', 'a file of the default boot entry has a different size than entry.conf says'),
+           ('digest-mismatch', 'a file of the default boot entry fails its checksum'),
+           ('bad-image', 'the default entry\'s kernel Image is not acceptable to the loader'),
+           ('too-large', 'the default entry\'s kernel Image is larger than the loader window'),
+           ('bad-board-dtb', 'the loader could not use the entry\'s board.dtb'),
+           ('bad-dtb', 'the default entry\'s board.dtb is not a valid device tree'),
+           ('ssd-', 'the loader could not read the SSD'))
+
+
+def reason_text(reason):
+    for key, text in REASONS:
+        if reason and key in reason:
+            return text
+    return 'the loader chose its rescue set (reason: %s)' % (reason or 'not reported')
+
+
+class Boot:
+    def __init__(self, boot='/boot', modules='/usr/lib/modules', cmdline=None, mkinitcpio='mkinitcpio', out=print,
+                 chosen=CHOSEN, proc_cmdline=PROC_CMDLINE, systemctl='systemctl', sleep=time.sleep, clock=time.monotonic,
+                 depmod='depmod', rescue_file=RESCUE_KVER_FILE, kept_file=KEPT_LIST, pacman='pacman', running=None,
+                 gpu_ready=GPU_READY, kernel_log=None, sddm_uid=None, root_uuid=None,
+                 sddm_conf=SDDM_CONF, sddm_conf_dir=SDDM_CONF_DIR):
+        self.root = Path(boot)/'m4'
+        self.entries = self.root/'entries'
+        self.modules = Path(modules)
+        self.cmdline_file = cmdline
+        self.mkinitcpio = mkinitcpio
+        self.out = out
+        self.chosen = chosen
+        self.proc_cmdline = proc_cmdline
+        self.systemctl = systemctl
+        self.sleep = sleep
+        self.clock = clock
+        self.depmod = depmod
+        self.rescue_file = rescue_file
+        self.kept_file = kept_file
+        self.pacman = pacman
+        self.running = running if running is not None else os.uname().release
+        self.gpu_ready = gpu_ready
+        self.kernel_log_file = kernel_log
+        self.sddm_uid = sddm_uid
+        self.root_uuid = root_uuid
+        self.sddm_conf = sddm_conf
+        self.sddm_conf_dir = sddm_conf_dir
+
+    # ---- boot counting ------------------------------------------------------------------------------------------------------
+    def pending(self):
+        try:
+            return (self.root/PENDING).read_text().strip() or '?'
+        except OSError:
+            return None
+
+    def pending_set(self):
+        """Write boot-pending (entry name) durably. A rescue boot leaves it alone."""
+        if safe_mode(self.proc_cmdline):
+            self.out('m4-boot: safe mode: boot-pending left as it is')
+            return 0
+        need(self.root.is_dir(), '%s does not exist' % self.root)
+        entry = dt_string('m4,boot-entry', self.chosen) or self.default() or 'unknown'
+        need(valid_name(entry), 'boot entry name %r is not valid' % entry)
+        write_atomic(self.root/PENDING, (entry + '\n').encode())
+        return 0
+
+    def pending_clear(self):
+        try:
+            os.unlink(self.root/PENDING)
+        except FileNotFoundError:
+            return False
+        fsync_path(self.root, directory=True)
+        return True
+
+    def active_seconds(self, unit):
+        """Seconds `unit` has been active (None when it is not active)."""
+        p = subprocess.run([self.systemctl, 'show', '-p', 'ActiveState', '-p', 'ActiveEnterTimestampMonotonic', unit],
+                           capture_output=True, text=True, timeout=10)
+        fields = dict(line.split('=', 1) for line in p.stdout.splitlines() if '=' in line)
+        if fields.get('ActiveState') != 'active':
+            return None
+        try:
+            stamp = int(fields.get('ActiveEnterTimestampMonotonic', '0'))/1e6
+        except ValueError:
+            return None
+        return self.clock() - stamp if stamp > 0 else None
+
+    def kernel_log(self):
+        """The kernel messages of this boot (journal first, dmesg as the fallback); a file in tests."""
+        if self.kernel_log_file:
+            try:
+                return Path(self.kernel_log_file).read_text(errors='replace')
+            except OSError:
+                return ''
+        for argv in (['journalctl', '-k', '-b', '-o', 'cat', '--no-pager'], ['dmesg']):
+            try:
+                p = subprocess.run(argv, capture_output=True, text=True, timeout=60, errors='replace')
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if p.returncode == 0 and p.stdout.strip():
+                return p.stdout
+        return ''
+
+    def greeter_uid(self):
+        if self.sddm_uid is not None:
+            return self.sddm_uid
+        try:
+            import pwd
+            return pwd.getpwnam('sddm').pw_uid
+        except (ImportError, KeyError):
+            return None
+
+    def autologin_user(self):
+        """The SDDM [Autologin] User (sddm.conf, then sddm.conf.d in name order; the last setting wins), or None."""
+        files = [Path(self.sddm_conf)]
+        try:
+            files += sorted(Path(self.sddm_conf_dir).glob('*.conf'))
+        except OSError:
+            pass
+        user = None
+        for f in files:
+            try:
+                text = f.read_text(errors='replace')
+            except OSError:
+                continue
+            section = None
+            for raw in text.splitlines():
+                line = raw.strip()
+                if line.startswith('[') and line.endswith(']'):
+                    section = line[1:-1].strip()
+                elif section == 'Autologin' and '=' in line and not line.startswith(('#', ';')):
+                    key, value = (x.strip() for x in line.split('=', 1))
+                    if key == 'User':
+                        user = value or None
+        return user
+
+    def greeter_verdict(self):
+        """('ok'|'wait'|'rejected', text) for a boot whose GPU driver is up: the greeter must hold a GPU slot and nothing may have been rejected."""
+        if not os.path.exists(self.gpu_ready):
+            return 'ok', 'no GPU on this boot'
+        log = self.kernel_log()
+        if REJECTED in log:
+            line = next(l for l in log.splitlines() if REJECTED in l)
+            return 'rejected', 'the GPU driver rejected a submit: %s' % line.strip()[-160:]
+        try:
+            ready = Path(self.gpu_ready).read_text(errors='replace')
+        except OSError:
+            ready = ''
+        if 'aurora' in ready.split():
+            # aurora mode: asahi.ko has no render-reuse slots; a session that drew without a failed submission is up.
+            if AURORA_FAILED in log:
+                line = next(l for l in log.splitlines() if AURORA_FAILED in l)
+                return 'rejected', 'the aurora GPU driver failed a client: %s' % line.strip()[-160:]
+            return 'ok', 'aurora GPU driver up, no failed GPU work'
+        uid = self.greeter_uid()
+        if uid is None:
+            return 'wait', 'the sddm user does not exist: the greeter cannot be told from another client'
+        pattern = re.compile(r'%s slot=\d+ uid=%d\b' % (re.escape(ADOPTED), uid))
+        if pattern.search(log):
+            return 'ok', 'the greeter (uid %d) holds a GPU slot' % uid
+        # SDDM autologin starts the user's session without a greeter: that session's GPU slot stands in for it.
+        auto = self.autologin_user()
+        if auto:
+            try:
+                import pwd
+                auid = pwd.getpwnam(auto).pw_uid
+            except (ImportError, KeyError):
+                auid = None
+            if auid is not None and re.search(r'%s slot=\d+ uid=%d\b' % (re.escape(ADOPTED), auid), log):
+                return 'ok', 'autologin: %s (uid %d) holds a GPU slot (no greeter on this boot)' % (auto, auid)
+        return 'wait', 'the kernel log has no "%s ... uid=%d" line: the greeter has not drawn on the GPU' % (ADOPTED, uid)
+
+    def pending_ok(self, unit='display-manager.service', seconds=OK_SECONDS, timeout=OK_TIMEOUT, grace=GREETER_GRACE):
+        """Remove boot-pending once `unit` has been active for `seconds` without a break and, with the GPU up, the greeter holds a GPU slot and
+        no submit was rejected. 0 removed or nothing pending, 1 refused or timed out (the mark stays: the next boot is the rescue set)."""
+        if safe_mode(self.proc_cmdline):
+            self.out('m4-boot: safe mode: boot-pending left as it is')
+            return 0
+        deadline = self.clock() + timeout
+        while self.pending() is not None:
+            held = self.active_seconds(unit)
+            if held is not None and held >= seconds:
+                verdict, text = self.greeter_verdict()
+                if verdict == 'ok':
+                    self.pending_clear()
+                    self.out('m4-boot: %s active for %d s (%s): boot-pending removed' % (unit, seconds, text))
+                    return 0
+                if verdict == 'rejected' or held >= seconds + grace:
+                    self.out('m4-boot: %s was up for %d s but %s: boot-pending stays, the next boot is the rescue set' % (unit, int(held), text))
+                    return 1
+            if self.clock() >= deadline:
+                self.out('m4-boot: %s was not active for %d s within %d s: boot-pending stays' % (unit, seconds, timeout))
+                return 1
+            self.sleep(1)
+        return 0
+
+    def boot_report(self):
+        """Lines for `status`: how this boot started and what the owner can do about it."""
+        lines = []
+        source = dt_string('m4,boot-source', self.chosen)
+        reason = dt_string('m4,boot-reason', self.chosen)
+        detail = dt_string('m4,boot-detail', self.chosen)
+        entry = dt_string('m4,boot-entry', self.chosen)
+        if source:
+            lines.append('this boot: %s%s' % ('entry %s' % entry if entry and source == 'entry' else source,
+                                               ' (reason %s%s)' % (reason, ', ' + detail if detail else '') if reason else ''))
+        if source == 'rescue' or safe_mode(self.proc_cmdline):
+            lines.append('safe mode: the GPU, display, AOP, idle and sensor drivers were not loaded; the desktop is software-rendered')
+            lines.append('cause: ' + reason_text(reason))
+        rescue = self.rescue_kver()
+        if rescue and not (self.modules/rescue/'vmlinuz').is_file():
+            lines.append('WARNING: the rescue kernel\'s module tree %s is missing: a rescue boot would stop in the rescue console' % (self.modules/rescue))
+        pending = self.pending()
+        if pending is not None:
+            lines.append('boot-pending: %s (the loader boots the rescue set until it is cleared)' % pending)
+        return lines
+
+    # ---- reading ------------------------------------------------------------------------------------------------------------
+    def loader_conf(self):
+        try:
+            data = (self.root/'loader.conf').read_bytes()
+        except OSError:
+            return {}
+        need(len(data) <= LOADER_CONF_MAX, 'loader.conf is larger than %d bytes' % LOADER_CONF_MAX)
+        return parse_conf(data.decode('ascii', 'replace'))
+
+    def default(self):
+        return self.loader_conf().get('default')
+
+    def entry_names(self):
+        try:
+            names = [p.name for p in self.entries.iterdir() if p.is_dir() and valid_name(p.name)]
+        except OSError:
+            return []
+        return sorted(names, key=lambda n: ((self.entries/n).stat().st_mtime, n))
+
+    def verify_entry(self, name, base=None):
+        """[] when the entry satisfies Boot ABI v1, else the list of problems. BASE: a directory not (yet) under entries/."""
+        problems = []
+        d = Path(base) if base else self.entries/name
+        try:
+            conf = parse_conf((d/'entry.conf').read_text())
+        except OSError:
+            return ['entry.conf missing']
+        if conf.get('abi') != str(ABI):
+            problems.append('abi=%s' % conf.get('abi'))
+        if not conf.get('kver'):
+            problems.append('kver missing')
+        cmd = conf.get('cmdline', '')
+        if not cmd or len(cmd.encode()) > CMDLINE_MAX:
+            problems.append('cmdline missing or longer than %d B' % CMDLINE_MAX)
+        window = {'Image': IMAGE_MAX, 'initramfs.img': INITRAMFS_MAX, 'board.dtb': DTB_MAX}
+        for f in FILES:
+            p = d/f
+            try:
+                size = p.stat().st_size
+            except OSError:
+                problems.append(f + ' missing')
+                continue
+            if size > window[f]:
+                problems.append('%s is %d B, window %d' % (f, size, window[f]))
+            if str(size) != conf.get(f + '_size'):
+                problems.append(f + ' size differs from entry.conf')
+            elif crc32_file(p) != conf.get(f + '_crc32'):
+                problems.append(f + ' crc32 differs from entry.conf')
+            elif sha256_file(p) != conf.get(f + '_sha256'):
+                problems.append(f + ' sha256 differs from entry.conf')
+        return problems
+
+    # ---- writing ------------------------------------------------------------------------------------------------------------
+    def cmdline(self):
+        for candidate in ([self.cmdline_file] if self.cmdline_file else [DEFAULT_CMDLINE, PACKAGE_CMDLINE]):
+            try:
+                text = Path(candidate).read_text()
+            except OSError:
+                continue
+            line = ' '.join(text.split())
+            if not any(w.startswith('root=') for w in line.split()):
+                line = ('root=UUID=%s %s' % (self.root_uuid or fs_uuid('/'), line)).rstrip()
+            need(all(0x20 <= ord(c) <= 0x7e for c in line) and len(line.encode()) <= CMDLINE_MAX,
+                 '%s: command line not printable ASCII or longer than %d B' % (candidate, CMDLINE_MAX))
+            return line
+        raise Refused('no command line file (%s, %s)' % (DEFAULT_CMDLINE, PACKAGE_CMDLINE))
+
+    def kernel_cmdline(self, kver):
+        """cmdline() without the words KVER's package lists in its module tree's cmdline-drop file."""
+        line = self.cmdline()
+        try:
+            drop = set((self.modules/kver/CMDLINE_DROP).read_text().split())
+        except OSError:
+            return line
+        return ' '.join(w for w in line.split() if w not in drop)
+
+    def kernel_files(self, kver):
+        base = self.modules/kver
+        need(base.is_dir(), '%s does not exist: linux-m4 for %s is not installed' % (base, kver))
+        vmlinuz, dtb = base/'vmlinuz', base/DTB_REL
+        need(vmlinuz.is_file(), '%s missing' % vmlinuz)
+        need(dtb.is_file(), '%s missing' % dtb)
+        return vmlinuz, dtb
+
+    def image_bytes(self, vmlinuz):
+        raw = vmlinuz.read_bytes()
+        if raw[:2] == b'\x1f\x8b':
+            raw = gzip.decompress(raw)
+        need(len(raw) > 64 and raw[56:60] == b'ARMd', '%s is not an arm64 Image (magic ARM\\x64 at 56 missing)' % vmlinuz)
+        # what the loader checks (BOOT-ABI.md step 5): text_offset 0, 16 KiB pages, image_size >= file and a multiple of 4 KiB
+        text_offset, image_size, flags = struct.unpack_from('<QQQ', raw, 8)
+        need(text_offset == 0, '%s: Image text_offset is %d, the loader needs 0' % (vmlinuz, text_offset))
+        need(flags & 7 == 4, '%s: Image flags %#x do not say 16 KiB pages' % (vmlinuz, flags))
+        need(image_size >= len(raw) and image_size % 4096 == 0, '%s: Image header image_size %d is smaller than the file or not 4 KiB aligned' % (vmlinuz, image_size))
+        need(image_size <= IMAGE_MAX, 'Image memory size is %d B, the loader window is %d B' % (image_size, IMAGE_MAX))
+        return raw
+
+    def sweep(self):
+        """Remove the work directories and entry temporaries a killed `install` left in /boot/m4 (they hold a whole initramfs and entry each)."""
+        removed = []
+        try:
+            children = list(self.root.iterdir())
+        except OSError:
+            return removed
+        for child in children:
+            if WORK_NAME.match(child.name) and child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+                removed.append(child.name)
+        if self.entries.is_dir():
+            for child in self.entries.glob('.tmp-*'):
+                shutil.rmtree(child, ignore_errors=True)
+                removed.append('entries/' + child.name)
+            for child in self.entries.glob('.old-*'):          # the aside copy of an in-place rebuild that was cut between its two renames
+                target = self.entries/child.name[len('.old-'):]
+                if not target.exists() and valid_name(target.name):
+                    os.rename(child, target)
+                    self.out('m4-boot: restored entry %s (an interrupted rebuild)' % target.name)
+                else:
+                    shutil.rmtree(child, ignore_errors=True)
+                    removed.append('entries/' + child.name)
+        if removed:
+            fsync_path(self.root, directory=True)
+            self.out('m4-boot: removed %d leftover temporary item(s) of an interrupted run: %s' % (len(removed), ', '.join(sorted(removed))))
+        return removed
+
+    def modules_dep_stale(self, kver):
+        """True when KVER's modules.dep is missing or older than any module file of the kernel."""
+        base = self.modules/kver
+        try:
+            dep = (base/'modules.dep').stat().st_mtime
+        except OSError:
+            return True
+        for dirpath, _dirs, names in os.walk(base):
+            for n in names:
+                if n.endswith(MODULE_SUFFIXES):
+                    try:
+                        if os.lstat(os.path.join(dirpath, n)).st_mtime > dep:
+                            return True
+                    except OSError:
+                        pass
+        return False
+
+    def ensure_depmod(self, kver):
+        if self.modules_dep_stale(kver):
+            self.run_depmod(kver, 'modules.dep was missing or older than the modules')
+
+    def run_depmod(self, kver, why):
+        argv = [self.depmod, '-a']
+        if self.modules.name == 'modules' and self.modules.parent.name == 'lib':
+            argv += ['-b', str(self.modules.parent.parent)]
+        argv.append(kver)
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+        except OSError as error:
+            raise Refused('depmod -a %s: %s' % (kver, error.strerror))
+        need(p.returncode == 0, 'depmod -a %s failed (%d): %s' % (kver, p.returncode, (p.stderr or p.stdout)[-300:]))
+        self.out('m4-boot: depmod -a %s (%s)' % (kver, why))
+
+    def build_initramfs(self, kver, out, config=MKINITCPIO_CONF):
+        self.ensure_depmod(kver)
+        cmd = [self.mkinitcpio, '-c', config, '-k', kver, '-g', str(out)]
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        need(p.returncode == 0 and Path(out).is_file(), 'mkinitcpio failed (%d): %s' % (p.returncode, (p.stderr or p.stdout)[-600:]))
+
+    def install(self, kver, initramfs=None, make_default=True):
+        limits(chosen=self.chosen)
+        vmlinuz, dtb = self.kernel_files(kver)
+        cmdline = self.kernel_cmdline(kver)
+        image = self.image_bytes(vmlinuz)
+        need(len(image) <= IMAGE_MAX, 'Image is %d B, the loader window is %d B' % (len(image), IMAGE_MAX))
+        dtb_bytes = dtb.read_bytes()
+        need(0 < len(dtb_bytes) <= DTB_MAX, 'board.dtb is %d B, the window is %d B' % (len(dtb_bytes), DTB_MAX))
+        self.entries.mkdir(parents=True, exist_ok=True)
+        self.sweep()
+        self.keep_restore()
+        with tempfile.TemporaryDirectory(prefix=WORK_PREFIX, dir=str(self.root)) as work:
+            if initramfs is None:
+                initramfs = Path(work)/'initramfs.img'
+                self.build_initramfs(kver, initramfs)
+            ram = Path(initramfs).read_bytes()
+            need(0 < len(ram) <= INITRAMFS_MAX, 'initramfs is %d B, the loader window is %d B' % (len(ram), INITRAMFS_MAX))
+            existing = self.entry_for_kver(kver)
+            name = existing or self.new_name(kver)
+            tmp = self.entries/('.tmp-' + name)
+            shutil.rmtree(tmp, ignore_errors=True)
+            tmp.mkdir()
+            payload = {'Image': image, 'initramfs.img': ram, 'board.dtb': dtb_bytes}
+            lines = ['abi=%d' % ABI, 'kver=' + kver, 'cmdline=' + cmdline]
+            for f in FILES:
+                data = payload[f]
+                with open(tmp/f, 'wb') as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                lines += ['%s_size=%d' % (f, len(data)), '%s_crc32=%08x' % (f, zlib.crc32(data) & 0xffffffff), '%s_sha256=%s' % (f, hashlib.sha256(data).hexdigest())]
+            write_atomic(tmp/'entry.conf', ('\n'.join(lines) + '\n').encode())
+            fsync_path(tmp, directory=True)
+            problems = self.verify_entry(name, base=tmp)       # before anything is replaced: a bad rebuild leaves the old entry as it was
+            if problems:
+                shutil.rmtree(tmp, ignore_errors=True)
+                raise Refused('the written entry does not verify: ' + '; '.join(problems))
+            final = self.entries/name
+            if existing:
+                self.replace_entry(tmp, final)
+            else:
+                os.rename(tmp, final)
+            fsync_path(self.entries, directory=True)
+        previous = self.default()
+        if make_default:
+            self.set_default(name)
+        self.prune(keep=self.keep_entries(name, previous))
+        self.out('m4-boot: entry %s %s (Image %d B, initramfs %d B, dtb %d B)%s' % (
+            name, 'rebuilt in place' if existing else 'written', len(image), len(ram), len(dtb_bytes), ', default' if make_default else ''))
+        return name
+
+    def replace_entry(self, tmp, final):
+        """Put the verified TMP directory in place of FINAL: an atomic exchange, else FINAL is renamed aside first (sweep restores it)."""
+        if exchange_dirs(tmp, final):
+            shutil.rmtree(tmp, ignore_errors=True)          # now holds the old entry
+            return
+        aside = self.entries/('.old-' + final.name)
+        shutil.rmtree(aside, ignore_errors=True)
+        os.rename(final, aside)
+        os.rename(tmp, final)
+        shutil.rmtree(aside, ignore_errors=True)
+
+    def entry_kver(self, name):
+        try:
+            return parse_conf((self.entries/name/'entry.conf').read_text()).get('kver') or name
+        except OSError:
+            return name
+
+    def entry_for_kver(self, kver):
+        """The entry that boots KVER: the one named like it, else the newest."""
+        names = [n for n in self.entry_names() if self.entry_kver(n) == kver]
+        if kver in names:
+            return kver
+        return names[-1] if names else None
+
+    def keep_entries(self, primary, previous_default=None):
+        """The entries to keep around PRIMARY (the default): itself, the entry of another kver that was the default before (else the newest
+        of another kver: the rollback) and the rescue kver's entry while its module tree exists. Same-kver duplicates of PRIMARY are not kept."""
+        pk = self.entry_kver(primary)
+        others = [n for n in self.entry_names() if n != primary and self.entry_kver(n) != pk]      # oldest first
+        keep = [primary]
+        if previous_default in others:
+            keep.append(previous_default)
+        elif others:
+            keep.append(others[-1])
+        rescue = self.rescue_kver()
+        if rescue and (self.modules/rescue/'vmlinuz').is_file():
+            same = [n for n in others if self.entry_kver(n) == rescue]
+            if same and same[-1] not in keep:
+                keep.append(same[-1])
+        return keep
+
+    def new_name(self, kver):
+        need(valid_name(kver), 'kernel version %r is not a valid entry name' % kver)
+        names = set(self.entry_names())
+        if kver not in names:
+            return kver
+        for n in range(2, 1000):
+            if '%s.%d' % (kver, n) not in names:
+                return '%s.%d' % (kver, n)
+        raise Refused('too many entries for ' + kver)
+
+    def set_default(self, name):
+        need(valid_name(name) and (self.entries/name).is_dir(), 'no entry %s' % name)
+        problems = self.verify_entry(name)
+        need(not problems, 'entry %s does not verify: %s' % (name, '; '.join(problems)))
+        write_atomic(self.root/'loader.conf', ('abi=%d\ndefault=%s\n' % (ABI, name)).encode())
+        # last: a power cut between the two leaves the pending file, which only sends the next boot to the rescue set
+        self.pending_clear()
+
+    # ---- module trees that survive a kernel upgrade ----------------------------------------------------------------------------
+    def rescue_kver(self):
+        try:
+            value = Path(self.rescue_file).read_text().strip()
+        except OSError:
+            return None
+        return value if valid_name(value) else None
+
+    def entry_kvers(self):
+        """The kver of every entry (entry.conf kver=, else the entry's name)."""
+        found = set()
+        for name in self.entry_names():
+            try:
+                kver = parse_conf((self.entries/name/'entry.conf').read_text()).get('kver')
+            except OSError:
+                kver = None
+            found.add(kver or name)
+        return {k for k in found if valid_name(k)}
+
+    def keep_wanted(self):
+        """The kvers whose trees the upgrade hooks keep: every entry's. The rescue kver's tree belongs to linux-m4-rescue (N3); it is only
+        protected from prune (drop_kept)."""
+        return self.entry_kvers()
+
+    @staticmethod
+    def link_tree(src, dst, skip=KEEP_SKIP):
+        """Hard-link every file of SRC that DST lacks (symlinks are copied as symlinks); idempotent, so a killed run is simply repeated.
+        Returns the number of paths created."""
+        made = 0
+        dst.mkdir(parents=True, exist_ok=True)
+        for dirpath, dirs, names in os.walk(src):
+            rel = Path(dirpath).relative_to(src)
+            if rel == Path('.'):
+                dirs[:] = [d for d in dirs if d not in skip]
+                names = [n for n in names if n not in skip]
+            for d in dirs:
+                (dst/rel/d).mkdir(parents=True, exist_ok=True)
+            for n in names:
+                a, b = Path(dirpath)/n, dst/rel/n
+                if os.path.lexists(b):
+                    continue
+                if a.is_symlink():
+                    os.symlink(os.readlink(a), b)
+                else:
+                    os.link(a, b)
+                made += 1
+        return made
+
+    def kept(self):
+        try:
+            return [l.strip() for l in Path(self.kept_file).read_text().splitlines() if valid_name(l.strip())]
+        except OSError:
+            return []
+
+    def write_kept(self, kvers):
+        path = Path(self.kept_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(path, ''.join(k + '\n' for k in sorted(set(kvers))).encode())
+
+    def keep_save(self):
+        """PreTransaction: hard-link the module trees that must outlive the transaction into .m4-keep (merging: a killed run is repeated)."""
+        keep = self.modules/KEEP_DIR
+        saved = []
+        for kver in sorted(self.keep_wanted()):
+            src = self.modules/kver
+            if src.is_dir():
+                keep.mkdir(parents=True, exist_ok=True)
+                self.link_tree(src, keep/kver)
+                saved.append(kver)
+        if saved:
+            self.out('m4-boot: kept the module trees of %s' % ', '.join(saved))
+        return saved
+
+    @staticmethod
+    def same_build(a, b):
+        try:
+            x, y = a.stat(), b.stat()
+        except OSError:
+            return False
+        return (x.st_dev, x.st_ino) == (y.st_dev, y.st_ino) or (x.st_size == y.st_size and x.st_mtime_ns == y.st_mtime_ns)
+
+    def keep_restore(self):
+        """PostTransaction (and the start of install/prune): put back what pacman removed from a kept tree, run depmod, record the tree."""
+        keep = self.modules/KEEP_DIR
+        restored = []
+        try:
+            copies = sorted(p for p in keep.iterdir() if p.is_dir() and valid_name(p.name))
+        except OSError:
+            return restored
+        kept = self.kept()
+        changed = False
+        for copy in copies:
+            kver = copy.name
+            tree = self.modules/kver
+            installed, old = tree/'vmlinuz', copy/'vmlinuz'
+            if installed.exists() and old.exists() and not self.same_build(installed, old):
+                shutil.rmtree(copy, ignore_errors=True)         # another build now owns this kver: its tree is the package's
+                continue
+            made = self.link_tree(copy, tree)
+            if made or not (tree/'modules.dep').exists():
+                self.run_depmod(kver, 'restored kept tree' if made else 'modules.dep missing')
+            shutil.rmtree(copy, ignore_errors=True)
+            if made:
+                restored.append(kver)
+            # unowned after the transaction = a kept tree (also when the distribution's own 10-linux-modules-post restored it first)
+            if kver not in kept and installed.exists() and self.package_owns(installed) is False:
+                kept.append(kver)
+                changed = True
+        if restored or changed:
+            self.write_kept(kept)
+        try:
+            keep.rmdir()
+        except OSError:
+            pass
+        if restored:
+            self.out('m4-boot: restored the module trees of %s' % ', '.join(restored))
+        return restored
+
+    def package_owns(self, path):
+        """True / False, or None when it cannot be told (then nothing is deleted)."""
+        try:
+            p = subprocess.run([*self.pacman.split(), '-Qqo', str(path)], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if p.returncode == 0:
+            return True
+        return False if 'No package owns' in p.stderr else None
+
+    def drop_kept(self):
+        """Delete recorded kept trees that are neither the rescue kver, an entry's kver, the running kernel, nor a package's again."""
+        rescue = self.rescue_kver()
+        wanted = self.keep_wanted() | {self.running} | ({rescue} if rescue else set())
+        left, dropped = [], []
+        for kver in self.kept():
+            tree = self.modules/kver
+            if kver in wanted:
+                left.append(kver)
+                continue
+            if not tree.is_dir():
+                continue
+            owned = self.package_owns(tree/'vmlinuz') if (tree/'vmlinuz').exists() else False
+            if owned is None:
+                left.append(kver)
+            elif owned:
+                continue
+            else:
+                shutil.rmtree(tree, ignore_errors=True)
+                dropped.append(kver)
+        if dropped or left != self.kept():
+            self.write_kept(left)
+        if dropped:
+            self.out('m4-boot: removed the kept module trees of %s (no entry, not the rescue kernel)' % ', '.join(dropped))
+        return dropped
+
+    def prune(self, keep=None):
+        self.sweep()
+        self.keep_restore()
+        if keep is None:
+            current = self.default()
+            if current and (self.entries/current).is_dir():
+                keep = self.keep_entries(current)
+            else:
+                names = self.entry_names()
+                keep = names[-2:]
+        for name in self.entry_names():
+            if name not in keep:
+                shutil.rmtree(self.entries/name, ignore_errors=True)
+        for p in self.entries.glob('.tmp-*') if self.entries.is_dir() else []:
+            shutil.rmtree(p, ignore_errors=True)
+        if self.entries.is_dir():
+            fsync_path(self.entries, directory=True)
+        self.drop_kept()
+
+    def previous(self):
+        """The rollback: the newest entry of another kver than the default's (a same-kver duplicate is not a rollback)."""
+        current = self.default()
+        ck = self.entry_kver(current) if current else None
+        others = [n for n in self.entry_names() if n != current and self.entry_kver(n) != ck]
+        return others[-1] if others else None
+
+
+def main(argv, out=print, clock=time.monotonic, sleep=time.sleep):
+    ap = argparse.ArgumentParser(prog='m4-boot', description=__doc__.split('\n')[0])
+    ap.add_argument('--boot', default='/boot', help=argparse.SUPPRESS)
+    ap.add_argument('--modules', default='/usr/lib/modules', help=argparse.SUPPRESS)
+    ap.add_argument('--cmdline', default=None, help=argparse.SUPPRESS)
+    ap.add_argument('--mkinitcpio', default='mkinitcpio', help=argparse.SUPPRESS)
+    ap.add_argument('--chosen', default=CHOSEN, help=argparse.SUPPRESS)
+    ap.add_argument('--proc-cmdline', default=PROC_CMDLINE, help=argparse.SUPPRESS)
+    ap.add_argument('--systemctl', default='systemctl', help=argparse.SUPPRESS)
+    ap.add_argument('--depmod', default='depmod', help=argparse.SUPPRESS)
+    ap.add_argument('--rescue-kver-file', default=RESCUE_KVER_FILE, help=argparse.SUPPRESS)
+    ap.add_argument('--kept-file', default=KEPT_LIST, help=argparse.SUPPRESS)
+    ap.add_argument('--pacman', default='pacman', help=argparse.SUPPRESS)
+    ap.add_argument('--running', default=None, help=argparse.SUPPRESS)
+    ap.add_argument('--gpu-ready', default=GPU_READY, help=argparse.SUPPRESS)
+    ap.add_argument('--kernel-log', default=None, help=argparse.SUPPRESS)
+    ap.add_argument('--sddm-uid', type=int, default=None, help=argparse.SUPPRESS)
+    ap.add_argument('--sddm-conf', default=SDDM_CONF, help=argparse.SUPPRESS)
+    ap.add_argument('--sddm-conf-dir', default=SDDM_CONF_DIR, help=argparse.SUPPRESS)
+    ap.add_argument('--root-uuid', default=None, help=argparse.SUPPRESS)
+    sub = ap.add_subparsers(dest='cmd')
+    p = sub.add_parser('install')
+    p.add_argument('--kver')
+    p.add_argument('--no-default', action='store_true')
+    p.add_argument('--initramfs', help=argparse.SUPPRESS)
+    sub.add_parser('list')
+    sub.add_parser('status')
+    sub.add_parser('prune')
+    sub.add_parser('clear')
+    p = sub.add_parser('pending')
+    p.add_argument('action', choices=('set', 'ok'))
+    p.add_argument('--unit', default='display-manager.service')
+    p.add_argument('--seconds', type=int, default=OK_SECONDS)
+    p.add_argument('--timeout', type=int, default=OK_TIMEOUT)
+    sub.add_parser('rollback')
+    p = sub.add_parser('select')
+    p.add_argument('entry')
+    p = sub.add_parser('keep')
+    p.add_argument('action', choices=('save', 'restore', 'list'))
+    p = sub.add_parser('rescue')
+    p.add_argument('--out', required=True)
+    p.add_argument('--kver')
+    try:
+        a = ap.parse_args(argv)
+    except SystemExit as exit_:
+        return 0 if exit_.code in (0, None) else 2
+    if not a.cmd:
+        ap.print_usage(sys.stderr)
+        return 2
+    b = Boot(a.boot, a.modules, a.cmdline, a.mkinitcpio, out, chosen=a.chosen, proc_cmdline=a.proc_cmdline,
+             systemctl=a.systemctl, sleep=sleep, clock=clock, depmod=a.depmod,
+             rescue_file=a.rescue_kver_file, kept_file=a.kept_file, pacman=a.pacman, running=a.running,
+             gpu_ready=a.gpu_ready, kernel_log=a.kernel_log, sddm_uid=a.sddm_uid, root_uuid=a.root_uuid,
+             sddm_conf=a.sddm_conf, sddm_conf_dir=a.sddm_conf_dir)
+    try:
+        limits(chosen=a.chosen)
+        if a.cmd == 'install':
+            kver = a.kver or newest_kver(b.modules)
+            b.install(kver, initramfs=a.initramfs, make_default=not a.no_default)
+        elif a.cmd == 'list':
+            default = b.default()
+            for name in b.entry_names():
+                problems = b.verify_entry(name)
+                out('%s %s %s' % ('*' if name == default else ' ', name, 'ok' if not problems else 'BAD: ' + '; '.join(problems)))
+            if not b.entry_names():
+                out('(no entries)')
+        elif a.cmd == 'status':
+            for line in b.boot_report():
+                out(line)
+            default = b.default()
+            if not default:
+                out('no default entry: the loader boots its embedded rescue set')
+                return 1
+            problems = b.verify_entry(default)
+            pending = b.pending()
+            if problems:
+                out('default %s: the loader will boot the RESCUE set (%s)' % (default, '; '.join(problems)))
+            elif pending is not None:
+                out('default %s: the loader will boot the RESCUE set (boot-pending)' % default)
+                out('to start the normal system again: sudo m4-boot select %s   (or: sudo m4-boot clear)' % default)
+            else:
+                out('default %s: the loader will boot it' % default)
+            return 0 if not problems and pending is None else 1
+        elif a.cmd == 'clear':
+            out('m4-boot: boot-pending %s' % ('removed' if b.pending_clear() else 'was not set'))
+        elif a.cmd == 'pending':
+            if a.action == 'set':
+                return b.pending_set()
+            return b.pending_ok(a.unit, a.seconds, a.timeout)
+        elif a.cmd == 'select':
+            b.set_default(a.entry)
+            out('m4-boot: default is %s' % a.entry)
+        elif a.cmd == 'rollback':
+            prev = b.previous()
+            need(prev, 'no previous entry')
+            b.set_default(prev)
+            out('m4-boot: default is %s' % prev)
+        elif a.cmd == 'prune':
+            b.prune()
+        elif a.cmd == 'keep':
+            if a.action == 'save':
+                b.keep_save()
+            elif a.action == 'restore':
+                b.keep_restore()
+            else:
+                rescue = b.rescue_kver()
+                out('rescue kernel: %s%s' % (rescue or '(none)', '' if not rescue or (b.modules/rescue/'vmlinuz').is_file() else '   MODULE TREE MISSING'))
+                out('entries: %s' % (', '.join(sorted(b.entry_kvers())) or '(none)'))
+                out('kept trees (restored by this tool, unowned): %s' % (', '.join(b.kept()) or '(none)'))
+        elif a.cmd == 'rescue':
+            kver = a.kver or newest_kver(b.modules)
+            b.build_initramfs(kver, a.out, config=RESCUE_CONF)
+            out('m4-boot: rescue initramfs %s (%d B)' % (a.out, Path(a.out).stat().st_size))
+        return 0
+    except Refused as error:
+        print('m4-boot: refused: %s' % error, file=sys.stderr)
+        return 1
+    except OSError as error:
+        print('m4-boot: %s' % error, file=sys.stderr)
+        return 1
+
+
+def newest_kver(modules):
+    names = [p.name for p in Path(modules).iterdir() if p.is_dir() and (p/'vmlinuz').is_file() and (p/DTB_REL).is_file()]
+    need(names, 'no linux-m4 kernel under %s (vmlinuz and %s)' % (modules, DTB_REL))
+    return sorted(names, key=lambda n: ((Path(modules)/n/'vmlinuz').stat().st_mtime, n))[-1]
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

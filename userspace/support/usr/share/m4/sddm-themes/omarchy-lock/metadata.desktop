@@ -1,0 +1,9 @@
+[SddmGreeterTheme]
+Name=Omarchy Lock
+Description=Current Omarchy lock appearance with normal SDDM password authentication
+Author=Local M4 setup
+Version=1
+MainScript=Main.qml
+QtVersion=6
+Theme-Id=omarchy-lock
+Theme-API=2.0

@@ -1,0 +1,10 @@
+# Modules that are loaded only by an attended test (m4-test ROW) or by hand, never by a unit at boot, and the parameters they refuse to work without.
+# The value is NOT in modprobe.d on purpose: the row passes it together with the other parameters of the attempt (a boot-time value would be
+# a standing permit). Format: <module> <TAB> <parameters> <TAB> who loads it.
+# Modules a unit loads at boot with a permit/enable parameter have their value in /usr/lib/modprobe.d instead (m4.conf, m4-gpu.conf).
+m4_codec_jack_probe	(none refused)	attended only, loaded by m4-test jack
+m4_bt_otp	permit	attended only: no m4-test row and no unit loads it (retired bring-up probe); the value is given by hand
+m4_smc_telemetry	enable	attended only: no m4-test row and no unit loads it (retired probe); the value is given by hand
+m4_codec_probe	(none refused)	attended only: no row loads it (retired probe)
+m4_codec_config_probe	(none refused)	attended only: no row loads it (retired probe)
+m4_usb_contract	(none refused)	attended only: no row loads it (retired probe)

@@ -1,0 +1,11 @@
+[Unit]
+Description=M4: tell the user that this boot is a rescue (safe mode) boot
+After=graphical-session.target
+ConditionPathExists=/proc/device-tree/chosen/m4,boot-source
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/m4/safe-notice
+
+[Install]
+WantedBy=graphical-session.target

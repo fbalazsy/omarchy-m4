@@ -1,0 +1,13 @@
+47423b20c551839c96cb13e0ced53f2e3b98f3d5af19c3deeb969fbe8dafa0a8  usr/lib/firmware/apple/aop-als-cal.bin
+6c684c16cc9c8e5cd1c914b722f3db45a07a99f5b142eba63d02586ca6ea7105  usr/lib/firmware/apple/isp_2924_01XX.dat
+7eb84312cb4ea74833ce9567ba8c92bc42a0c26c5c34d6bdfaa5cb65abfe4b26  usr/lib/firmware/apple/tpmtfw-j616s.bin
+61351eb4f8d278ae81c84c64d34e1c02d5b66ee2762f3a065c48660ba84a826c  usr/lib/firmware/brcm/brcmbt4388c2-apple,hostomel-a.bin
+b6b4eeb9ed261d2169ebbd532db4abe45dc13b77f4b58f895a804982886a29ac  usr/lib/firmware/brcm/brcmbt4388c2-apple,hostomel-a.ptb
+d022f84ba71192d2d4ae75bf706803d911a0856f5673eb455356dbdc8d06d777  usr/lib/firmware/brcm/brcmbt4388c2-apple,hostomel-u.bin
+b6b4eeb9ed261d2169ebbd532db4abe45dc13b77f4b58f895a804982886a29ac  usr/lib/firmware/brcm/brcmbt4388c2-apple,hostomel-u.ptb
+5774de6da1e0331ec269f656752d0c2cb9363e3f12d281b9a517dd203fb05f31  usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel-WLMT-a.txt
+d665bb8474c13afd39bad3bd0e0752e72dafcc0ea291f7dee330cc85468eea1e  usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel-WLMT-u.txt
+8b18acb6116622c6161de80ef510dfa9afc47dd963440f090770e57d14b3e928  usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel.bin
+fe969bc12cabe622ec493f0903dff1ea3d6c9ba3d1e6f433615c26e9eba8b491  usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel.clm_blob
+a772cc7ae1d7893b71476c7f79b6746a2a504b1c3a9daa14502c2aab74759710  usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel.sig
+8797b79bafc5936468c33d2b3f02edc245c8b2f782da64324984b6dc72ef0a5f  usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel.txcap_blob

@@ -1,0 +1,43 @@
+# Maintainer: M4 project (N3) <m4@localhost>
+#
+# linux-m4-rescue: the module tree of the kernel embedded in the loader's rescue set (linux-m4 7.1.13-3, kver 7.1.13-m4),
+# as a package of its own so that it is *owned* and survives distribution cleanup (kernel-modules-hook's linux-modules-cleanup.service
+# deletes every /usr/lib/modules/<kver> that no package owns) and linux-m4 upgrades.
+#
+# Taken byte for byte from linux-m4-7.1.13-3-aarch64.pkg.tar.zst (sha256 pinned below). It is deliberately NOT an installable kernel:
+#   - `pkgbase` is not packaged: mkinitcpio's hook (and anything else that looks for a kernel by pkgbase) skips a tree without it;
+#   - `vmlinuz` and `dtb/` are not package files either (a package file at usr/lib/modules/*/vmlinuz fires 10-linux-modules-*.hook and
+#     90-m4-boot.hook -> `m4-boot install` for the newest kernel). They are stashed under /usr/share/linux-m4-rescue and put in place
+#     by the install scriptlet, because m4-boot's status check and its keep/prune logic want <tree>/vmlinuz to exist.
+# The depmod outputs (modules.dep ...) are not packaged: 60-depmod.hook generates them from modules.order, as for every kernel.
+# Build with SOURCE_DATE_EPOCH=1792017820 (the build time of linux-m4 7.1.13-3): makepkg stamps every member with it, which is
+# what the original files carry, so the payload is identical to the -3 tree including mtimes (check-rescue.py compares them).
+pkgname=linux-m4-rescue
+pkgver=7.1.13
+pkgrel=1
+pkgdesc='Module tree of the M4 loader rescue kernel (7.1.13-m4, linux-m4 7.1.13-3); not an installable kernel'
+arch=(aarch64)
+url='https://github.com/jgoyvaerts/linux'   # the owner's rescue kernel (7.1.13-m4) is not published
+license=(GPL-2.0-only)
+depends=()   # the scriptlet only needs cp/mkdir/rm/rmdir (coreutils is in base)
+options=(!strip !debug !purge !zipman !docs !libtool !staticlibs !lto)
+install=linux-m4-rescue.install
+# the linux-m4 7.1.13-3 package (the loader's embedded rescue kernel); on the M4: cp /var/lib/m4-repo/linux-m4-7.1.13-3-aarch64.pkg.tar.zst .
+_src=linux-m4-7.1.13-3-aarch64.pkg.tar.zst
+source=("$_src")
+noextract=("$_src")
+sha256sums=('9f04f73a95fc1b75adc09dd8efa1a5e793907e3dfd8c185b2ec9d33cadece5f6')
+
+package() {
+  local kver=7.1.13-m4 t="$pkgdir/usr/lib/modules/7.1.13-m4" s="$pkgdir/usr/share/linux-m4-rescue"
+  mkdir -p "$pkgdir"
+  bsdtar -xpf "$srcdir/$_src" -C "$pkgdir" --exclude='.PKGINFO' --exclude='.BUILDINFO' --exclude='.MTREE' --exclude='.INSTALL' --exclude='.CHANGELOG'
+  [[ -d $t ]] || { echo "tree $t missing from $_src" >&2; return 1; }
+  # not packaged under usr/lib/modules: stash (see the header)
+  install -d "$s/dtb/apple"
+  mv "$t/vmlinuz" "$s/vmlinuz"
+  mv "$t"/dtb/apple/*.dtb "$s/dtb/apple/"
+  rmdir "$t/dtb/apple" "$t/dtb"
+  rm -f "$t/pkgbase"
+  [[ -f $t/modules.order && -f $t/modules.builtin ]] || { echo "modules.order/modules.builtin missing" >&2; return 1; }
+}

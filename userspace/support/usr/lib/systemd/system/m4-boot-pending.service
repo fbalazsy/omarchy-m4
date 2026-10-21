@@ -1,0 +1,18 @@
+[Unit]
+Description=M4 boot counting: mark this boot as not yet complete (the loader boots the rescue set while the mark exists)
+Documentation=man:m4-boot(8)
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+ConditionKernelCommandLine=!m4.safe
+ConditionVirtualization=!container
+ConditionPathExists=/boot/m4
+ConditionPathExists=/etc/systemd/system/display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/m4-boot pending set
+
+[Install]
+WantedBy=sysinit.target

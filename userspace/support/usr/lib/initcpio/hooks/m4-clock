@@ -1,0 +1,58 @@
+#!/usr/bin/ash
+# m4-clock: PMU counter -> system clock. seconds = (counter + 2 * sign_extend48(offset)) / 65536.
+# Runs in the initramfs (busybox ash, which has `local`).
+# shellcheck disable=SC3043
+
+m4_clock_u48() {
+    # m4_clock_u48 FILE OFFSET -> sets m4_u48 from 6 little-endian bytes; returns 1 when unreadable
+    local hex r b0 b1 b2 b3 b4 b5
+    m4_u48=
+    hex=$(dd if="$1" bs=1 skip=$(($2)) count=6 2>/dev/null | xxd -p 2>/dev/null) || return 1
+    [ "${#hex}" = 12 ] || return 1
+    case $hex in *[!0-9a-f]*) return 1 ;; esac
+    b0=${hex%??????????}; r=${hex#??}
+    b1=${r%????????}; r=${r#??}
+    b2=${r%??????}; r=${r#??}
+    b3=${r%????}; r=${r#??}
+    b4=${r%??}; b5=${r#??}
+    m4_u48=$(( 0x$b5$b4$b3$b2$b1$b0 ))
+    return 0
+}
+
+m4_clock_seconds() {
+    # m4_clock_seconds FILE -> sets m4_s, returns 1 when unreadable
+    local c o
+    m4_clock_u48 "$1" 0x2002 || return 1
+    c=$m4_u48
+    m4_clock_u48 "$1" 0x2100 || return 1
+    o=$m4_u48
+    [ $(( o >= (1 << 47) )) = 1 ] && o=$(( o - (1 << 48) ))
+    m4_s=$(( (c + 2 * o) >> 16 ))
+    return 0
+}
+
+run_hook() {
+    local f g floor ceiling
+    floor=1735689600       # 2025-01-01: below this the counter value is not a time
+    ceiling=4102444800     # 2100-01-01
+    f=
+    for g in ${m4_clock_glob:-/sys/bus/nvmem/devices/spmi_nvmem*/nvmem}; do     # the glob is a variable only for the test
+        [ -e "$g" ] || continue
+        [ -z "$f" ] || { msg "m4-clock: two nvmem candidates, clock left alone"; return 0; }
+        f=$g
+    done
+    if [ -z "$f" ]; then
+        sleep 1
+        for g in ${m4_clock_glob:-/sys/bus/nvmem/devices/spmi_nvmem*/nvmem}; do [ -e "$g" ] && f=$g; done
+    fi
+    [ -n "$f" ] || { msg "m4-clock: no PMU nvmem device, clock left to systemd"; return 0; }
+    m4_clock_seconds "$f" || { msg "m4-clock: PMU counter unreadable, clock left to systemd"; return 0; }
+    if [ $(( m4_s >= floor && m4_s < ceiling )) = 1 ]; then
+        date -u -s "@$m4_s" >/dev/null 2>&1 && msg "m4-clock: clock set from the PMU ($m4_s)"
+    else
+        msg "m4-clock: implausible PMU time ($m4_s), clock left to systemd"
+    fi
+    return 0
+}
+
+# vim: set ft=sh ts=4 sw=4 et:

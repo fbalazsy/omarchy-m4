@@ -1,0 +1,174 @@
+#!/usr/bin/python3 -I
+"""Pin the Omarchy shell QML to QtQuick 6.11 names.
+
+Qt 6.12 added a QtQuick singleton called "Color". Omarchy's shell has its own
+singleton qs.Commons.Color and imports "QtQuick" unversioned, so on Qt 6.12 the
+name resolves to Qt's type and the menu stays black. "import QtQuick 6.11" hides
+the 6.12-only names.
+
+The files this script changes are recorded (sha256 + path) in
+/var/lib/m4-omarchy-qt612-compat/pinned.list; --revert touches only those, and
+only while they still have the content that was recorded. Files that upstream
+ships pinned are never changed or reverted.
+
+Usage: pin-qtquick [--apply|--revert|--check]
+Env:   OMARCHY_SHELL_DIR (default /usr/share/omarchy/shell),
+       M4_QT_COMPAT_STATE (default /var/lib/m4-omarchy-qt612-compat)
+"""
+import hashlib
+import os
+import sys
+
+SHELL_DIR = os.environ.get("OMARCHY_SHELL_DIR", "/usr/share/omarchy/shell")
+STATE_DIR = os.environ.get("M4_QT_COMPAT_STATE", "/var/lib/m4-omarchy-qt612-compat")
+STATE = os.path.join(STATE_DIR, "pinned.list")
+PLAIN = b"import QtQuick"
+PINNED = b"import QtQuick 6.11"
+
+
+def qml_files():
+    for root, _dirs, names in os.walk(SHELL_DIR):
+        for name in names:
+            if name.endswith(".qml"):
+                yield os.path.join(root, name)
+
+
+def read(path):
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def replace_lines(data, old, new):
+    lines = data.split(b"\n")
+    hit = False
+    for i, line in enumerate(lines):
+        if line == old:
+            lines[i] = new
+            hit = True
+    return hit, b"\n".join(lines)
+
+
+def write_atomic(path, data, mode=None):
+    tmp = path + ".m4tmp"
+    with open(tmp, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if mode is not None:
+        os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def load_state():
+    state = {}
+    try:
+        text = read(STATE).decode("utf-8", "surrogateescape")
+    except FileNotFoundError:
+        return state
+    for line in text.split("\n"):
+        digest, sep, path = line.partition("\t")
+        if sep and path:
+            state[path] = digest
+    return state
+
+
+def save_state(state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    body = "".join("%s\t%s\n" % (state[p], p) for p in sorted(state))
+    write_atomic(STATE, body.encode("utf-8", "surrogateescape"), 0o644)
+
+
+def apply():
+    state = load_state()
+    # drop records of files upstream has since replaced with different content
+    for path in list(state):
+        try:
+            if hashlib.sha256(read(path)).hexdigest() != state[path]:
+                del state[path]
+        except OSError:
+            del state[path]
+    todo = []
+    for path in qml_files():
+        if "\n" in path:
+            print("pin-qtquick: skipping name with newline: %r" % path)
+            continue
+        try:
+            hit, new = replace_lines(read(path), PLAIN, PINNED)
+        except OSError as err:
+            print("pin-qtquick: cannot read %s: %s" % (path, err))
+            continue
+        if hit:
+            todo.append((path, new))
+    # state first: a crash can leave a recorded file unpinned (harmless), never an unrecorded pin
+    for path, new in todo:
+        state[path] = hashlib.sha256(new).hexdigest()
+    if todo:
+        save_state(state)
+    done = 0
+    for path, new in todo:
+        try:
+            write_atomic(path, new, os.stat(path).st_mode & 0o7777)
+            done += 1
+        except OSError as err:
+            print("pin-qtquick: cannot write %s: %s" % (path, err))
+    print("pin-qtquick: pinned %d file(s) under %s (%d recorded)" % (done, SHELL_DIR, len(state)))
+
+
+def revert():
+    state = load_state()
+    done = 0
+    keep = {}
+    for path, digest in state.items():
+        try:
+            data = read(path)
+        except OSError:
+            continue
+        if hashlib.sha256(data).hexdigest() != digest:
+            print("pin-qtquick: %s changed since it was pinned, left alone" % path)
+            continue
+        hit, new = replace_lines(data, PINNED, PLAIN)
+        if hit:
+            try:
+                write_atomic(path, new, os.stat(path).st_mode & 0o7777)
+                done += 1
+            except OSError as err:
+                print("pin-qtquick: cannot write %s: %s" % (path, err))
+                keep[path] = digest
+    if keep:
+        save_state(keep)
+    elif os.path.exists(STATE):
+        os.unlink(STATE)
+    print("pin-qtquick: reverted %d file(s)" % done)
+
+
+def check():
+    left = []
+    for path in qml_files():
+        try:
+            if any(line == PLAIN for line in read(path).split(b"\n")):
+                left.append(path)
+        except OSError:
+            pass
+    print("pin-qtquick: %d file(s) still import unversioned QtQuick" % len(left))
+    return 1 if left else 0
+
+
+def main(argv):
+    mode = argv[0] if argv else "--apply"
+    if mode != "--check" and not os.path.isdir(SHELL_DIR):
+        print("pin-qtquick: %s not found, nothing to do" % SHELL_DIR)
+        return 0
+    if mode == "--apply":
+        apply()
+    elif mode == "--revert":
+        revert()
+    elif mode == "--check":
+        return check()
+    else:
+        print("usage: pin-qtquick [--apply|--revert|--check]", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

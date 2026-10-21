@@ -1,0 +1,20 @@
+# linux-m4-rescue: put the rescue kernel's vmlinuz and dtbs next to its modules without making them package files under
+# usr/lib/modules/*/ (which would fire the kernel install hooks). Idempotent; mtimes are kept.
+_tree=usr/lib/modules/7.1.13-m4
+_stash=usr/share/linux-m4-rescue
+
+_put() {
+  mkdir -p "$_tree/dtb/apple"
+  # a stray pkgbase (an unowned copy of the linux-m4 tree, --overwrite install) would make this tree look like an installable kernel
+  rm -f "$_tree/pkgbase"
+  cp -pf "$_stash/vmlinuz" "$_tree/vmlinuz"
+  cp -pf "$_stash"/dtb/apple/*.dtb "$_tree/dtb/apple/"
+}
+
+post_install() { _put; }
+post_upgrade() { _put; }
+
+pre_remove() {
+  rm -f "$_tree/vmlinuz" "$_tree"/dtb/apple/*.dtb
+  rmdir "$_tree/dtb/apple" "$_tree/dtb" 2>/dev/null || true
+}

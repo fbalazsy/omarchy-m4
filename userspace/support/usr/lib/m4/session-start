@@ -1,0 +1,5 @@
+#!/bin/sh
+# The M4 desktop session (SDDM runs this as the user): bring the shell policy in line with the renderer this session will use, then start
+# UWSM with the M4 Hyprland profile. The policy step never blocks the session.
+/usr/lib/m4/shell-policy || true
+exec uwsm start -g -1 -e -D Hyprland:M4 -- hyprland.desktop -- --config /usr/share/m4/hyprland.lua

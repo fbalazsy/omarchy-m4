@@ -1,0 +1,4 @@
+# Documentation of the initramfs module list (kept in /etc/m4/mkinitcpio.conf MODULES=). The previous initrd inserted nvme-core and nvme-apple (and nvme only under QEMU); N1 always loads all three so that QEMU boots the image the owner gets; everything else the loader's DT needs is built in. Lane K's FOR-USERSPACE.md may extend the list.
+nvme_core
+nvme
+nvme_apple

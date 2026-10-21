@@ -1,0 +1,16 @@
+[Unit]
+Description=M4 boot counting: the display manager stayed up for 20 s, remove the boot-pending mark
+Documentation=man:m4-boot(8)
+After=display-manager.service
+ConditionKernelCommandLine=!m4.safe
+ConditionVirtualization=!container
+ConditionPathExists=/boot/m4/boot-pending
+ConditionPathExists=/etc/systemd/system/display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/m4-boot pending ok --unit display-manager.service --seconds 20
+Nice=10
+
+[Install]
+WantedBy=graphical.target

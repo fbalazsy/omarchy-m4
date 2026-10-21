@@ -1,0 +1,24 @@
+# Writes /boot/m4 (Boot ABI v1) with m4-boot: the kernel, its initramfs (mkinitcpio -c /etc/m4/mkinitcpio.conf) and loader.conf.
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/lib/modules/*/vmlinuz
+Target = usr/lib/modules/*/dtb/apple/t6040-j616s.dtb
+Target = usr/share/m4/cmdline
+Target = usr/share/m4/abi.conf
+Target = usr/lib/initcpio/*
+Target = usr/lib/modprobe.d/*
+
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = linux-m4
+Target = mkinitcpio
+Target = mkinitcpio-busybox
+
+[Action]
+Description = Writing the M4 boot entry (/boot/m4)...
+When = PostTransaction
+Exec = /usr/bin/m4-boot install

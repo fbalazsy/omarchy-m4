@@ -1,0 +1,66 @@
+# Maintainer: Caleb Maclennan <caleb@alerque.com>
+# M4 rebuild (R52 lane S): official Arch PKGBUILD 0.3.2-1 rebuilt against Qt 6.12.0 as pkgrel 1.1,
+# plus the project upower patch (skip KbdBacklight objects) that the shipped /opt quickshell carried.
+
+pkgname=quickshell
+pkgver=0.3.2
+pkgrel=1.1
+pkgdesc='Flexible toolkit for making desktop shells with QtQuick'
+arch=(x86_64 aarch64)
+url="https://git.outfoxxed.me/$pkgname/$pkgname"
+license=(LGPL-3.0-only)
+depends=(cpptrace libcpptrace.so
+         glibc # libc.so libm.so
+         hicolor-icon-theme
+         jemalloc libjemalloc.so
+         libdrm # libdrm.so
+         libgcc libgcc_s.so
+         libglvnd libEGL.so libOpenGL.so
+         libpipewire libpipewire-0.3.so
+         libstdc++ libstdc++.so
+         libxcb # libxcb.so
+         mesa # libgbm.so
+         pam libpam.so
+         polkit
+         qt6-base # libQt6Core.so libQt6DBus.so libQt6Gui.so libQt6Network.so libQt6Widgets.so
+         qt6-declarative # libQt6Qml.so libQt6Quick.so
+         qt6-svg
+         qt6-wayland # libQt6WaylandClient.so
+         wayland libwayland-client.so)
+makedepends=(cli11
+             cmake
+             ninja
+             qt6-shadertools
+             spirv-tools
+             vulkan-headers
+             wayland-protocols)
+_archive="$pkgname-$pkgver"
+source=("$_archive.tar.gz::$url/archive/v$pkgver.tar.gz"
+        0001-upower-skip-keyboard-backlight-objects.patch)
+sha256sums=('f14115a73c9fff6aa6399f924b632e88c3ce2cead2657f814a7825341f35baad'
+            'a207cac964a50acaba1cc1a8536d4124c66c717e8af3275a062674c147bae4e2')
+
+prepare() {
+	cd "$pkgname"
+	patch -Np1 -i "$srcdir/0001-upower-skip-keyboard-backlight-objects.patch"
+}
+
+build() {
+	cd "$pkgname"
+	local cmake_options=(
+		-D CMAKE_BUILD_TYPE=RelWithDebInfo
+		-D DISTRIBUTOR='Arch Linux'
+		-D DISTRIBUTOR_DEBUGINFO_AVAILABLE=Yes
+		-D CRASH_REPORTER=Off
+		-D CMAKE_INSTALL_PREFIX=/usr
+		-D INSTALL_QML_PREFIX=lib/qt6/qml
+	)
+	cmake -G Ninja -B build -W no-dev "${cmake_options[@]}"
+	cmake --build build
+}
+
+package() {
+	cd "$pkgname"
+	DESTDIR="$pkgdir" cmake --install build
+	install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname/" LICENSE
+}

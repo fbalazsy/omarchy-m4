@@ -1,0 +1,20 @@
+[Unit]
+Description=M4 display: take the panel over from simpledrm with the display driver (simpledrm stays when it cannot)
+ConditionFirmware=device-tree-compatible(apple,j616s)
+StartLimitIntervalSec=60
+StartLimitBurst=3
+ConditionKernelCommandLine=!m4.safe
+ConditionVirtualization=!container
+After=m4-boot-pending.service
+After=m4-gpu.service
+Wants=m4-gpu.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/m4/display-load
+TimeoutStartSec=120
+
+[Install]
+WantedBy=graphical.target

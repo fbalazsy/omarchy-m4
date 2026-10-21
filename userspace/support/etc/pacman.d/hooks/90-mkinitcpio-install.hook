@@ -1,0 +1,12 @@
+# m4-support: this file replaces mkinitcpio's hook of the same name (hooks in /etc/pacman.d/hooks win over /usr/share/libalpm/hooks).
+# mkinitcpio's own hook would create /etc/mkinitcpio.d/linux-m4.preset and write /boot/vmlinuz-linux-m4 and /boot/initramfs-linux-m4*.img
+# with the Asahi /etc/mkinitcpio.conf. On this machine only `m4-boot` builds an initramfs and writes /boot/m4 (90-m4-boot.hook).
+[Trigger]
+Type = Package
+Operation = Install
+Target = m4-support-never-matches
+
+[Action]
+Description = mkinitcpio's initramfs generation is replaced by m4-boot (see /etc/pacman.d/hooks/90-mkinitcpio-install.hook)
+When = PostTransaction
+Exec = /usr/bin/true

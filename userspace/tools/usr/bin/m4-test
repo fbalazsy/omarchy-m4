@@ -1,0 +1,134 @@
+#!/usr/bin/python3 -B
+"""m4-test NAME: run one targeted hardware test on an ordinary desktop boot (as root: sudo m4-test NAME).
+
+Each test is a standalone script under /usr/lib/m4/tests; the dispatcher gives it the process limits of the old suite, the root-only run
+state directory (/run/m4/state) and prints the script's JSON result. Nothing is gated on a test having run. A rescue boot (m4.safe on the
+command line) refuses every row that touches hardware. `m4-test list` prints the names; `m4-test NAME --help` the row's usage."""
+from pathlib import Path
+import os
+import subprocess
+import sys
+
+BASE = Path('/usr/lib/m4/tests')
+LIB = '/usr/lib/m4'
+PYTHONPATH = LIB
+sys.path.insert(0, LIB)
+try:
+    import m4host  # noqa: E402
+except ImportError:
+    print('m4-test refused: m4-support is not installed (%s/m4host.py is missing)' % LIB, file=sys.stderr)
+    sys.exit(1)
+
+OWNED = ('--wait', '--pipe', '--collect', '--quiet', '--service-type=exec', '--property=TimeoutStartSec=10s',
+         '--property=TimeoutStopSec=10s', '--property=KillMode=control-group', '--property=LimitCORE=0',
+         '--setenv=PYTHONPATH=' + PYTHONPATH)
+# name: (unit, run seconds, script relative to BASE, arguments)
+TESTS = {
+    'cpu-memory': ('m4-test-cpu-memory', 60, 'cpu-memory/cpu-memory.py', ()),
+    'cpu-topology': ('m4-test-cpu-topology', 40, 'cpu-topology/cpu-topology.py', ()),
+    'cpu-idle-regs': ('m4-test-cpu-idle-regs', 20, 'cpu-idle-regs/cpu-idle-regs.py', ()),
+    'charge': ('m4-test-charge', 90, 'charge-acceptance.py', ()),
+    'presentation': ('m4-test-presentation', 95, 'gpu-presentation/presentation-watch.py', ()),
+    'trackpad-trace': ('m4-test-trackpad-trace', 70, 'software/trackpad-trace.py', ()),
+    'kbd-backlight': ('m4-test-kbd-backlight', 20, 'kbd-backlight/check.py', ()),
+    'bluetooth': ('m4-test-bluetooth', 20, 'bluetooth-state.py', ()),
+    'battery': ('m4-test-battery', 30, 'battery.py', ()),
+    'display-pacing': ('m4-test-display-pacing', 420, 'dcp/display-pacing.py', ()),
+    'boot': ('m4-test-boot', 30, 'boot-report.py', ()),
+}
+OWN_OPTIONS = {'avd': ('avd/avd-test.py', ''),
+               'usb2': ('usb/usb-test.py', '')}
+DT = Path('/sys/firmware/devicetree/base')
+# what each row needs to exist before it starts anything: (path, the reason named when it is absent)
+NEEDS = {
+    'battery': ('/sys/class/power_supply/macsmc-battery', 'no macsmc-battery power supply (macsmc_power is not bound)'),
+    'charge': ('/sys/class/power_supply/macsmc-battery', 'no macsmc-battery power supply (macsmc_power is not bound)'),
+    'bluetooth': ('/sys/class/bluetooth', 'no Bluetooth controller is registered (hci_bcm4377 not bound: see journalctl -k)'),
+    'kbd-backlight': ('/sys/class/leds/apple::kbd_backlight', 'no apple::kbd_backlight LED (pwm_apple/leds_pwm not bound)'),
+    'cpu-idle-regs': ('/sys/firmware/devicetree/base/chosen/m4,cpu-idle-regs', "the loader published no /chosen m4,cpu-idle-regs record"),
+    'display-pacing': ('/sys/module/appledrm/parameters', 'the display driver (appledrm) is not loaded (see /run/m4/display-failed)'),
+    'presentation': ('/run/user/1000', 'nobody is logged in on the desktop (no /run/user/1000)'),
+}
+SAFE_ROWS = {'boot', 'battery', 'bluetooth', 'kbd-backlight', 'cpu-topology', 'cpu-idle-regs', 'cpu-memory', 'charge', 'trackpad-trace'}
+
+
+def need(ok, text):
+    if not ok:
+        raise RuntimeError(text)
+
+
+def run(argv, timeout):
+    p = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+    sys.stdout.write(p.stdout)
+    sys.stderr.write(p.stderr)
+    return p.returncode
+
+
+def unit_absent(unit):
+    try:
+        p = subprocess.run(['/usr/bin/systemctl', 'show', '--property=LoadState', '--value', unit + '.service'],
+                           text=True, capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError('systemctl is not usable here (%s): m4-test runs rows as systemd units on a booted system' % error)
+    need(p.returncode != 0 or p.stdout.strip() == 'not-found', 'test unit %s is still present' % unit)
+
+
+def precondition(name):
+    """The named reason a row cannot start on this system, or None."""
+    if not Path('/run/systemd/system').is_dir():
+        return 'this system was not booted by systemd (m4-test runs rows as units)'
+    try:
+        compatible = (DT/'compatible').read_bytes()
+    except OSError:
+        compatible = b''
+    if name != 'boot' and b'apple,j616s' not in compatible:
+        return 'this is not an Apple J616s MacBook (no apple,j616s in the device tree)'
+    path, why = NEEDS.get(name, (None, None))
+    if path and not Path(path).exists():
+        return why
+    return None
+
+
+def main(argv):
+    names = sorted(TESTS) + sorted(OWN_OPTIONS)
+    if len(argv) == 2 and argv[1] in ('-h', '--help') and argv[0] in TESTS:
+        print('usage: m4-test %s   (as root; no options; one run per boot; runs %s, what it touches: README)' % (argv[0], TESTS[argv[0]][2]))
+        return 0
+    if not argv or argv[0] in ('-h', '--help', 'list') or (len(argv) > 1 and argv[0] not in OWN_OPTIONS):
+        print('usage: m4-test NAME   (as root)\n  ' + '\n  '.join(names))
+        return 0 if argv and argv[0] in ('list', '-h', '--help') else 2
+    name = argv[0]
+    if name not in names:
+        print('unknown test %r; m4-test list' % name, file=sys.stderr)
+        return 2
+    need(os.geteuid() == 0, 'sudo required')
+    if name in OWN_OPTIONS and any(x in ('-h', '--help') for x in argv[1:]):     # the row's own usage text needs no hardware
+        script, stage = OWN_OPTIONS[name]
+        os.execve('/usr/bin/python3', ['/usr/bin/python3', '-B', str(BASE/script), *([stage] if stage else []), *argv[1:]],
+                  dict(os.environ, PYTHONPATH=PYTHONPATH))
+    if m4host.safe_mode() and name not in SAFE_ROWS:
+        print('m4-test %s refused: this is a rescue (safe mode) boot; the hardware drivers were not loaded. m4-boot status says why.' % name,
+              file=sys.stderr)
+        return 1
+    reason = precondition(name)
+    need(reason is None, reason)
+    m4host.boot_identity()
+    sys.path.insert(0, LIB)
+    import m4state
+    m4state.state()
+    if name in OWN_OPTIONS:
+        script, stage = OWN_OPTIONS[name]
+        env = dict(os.environ, PYTHONPATH=PYTHONPATH)
+        os.execve('/usr/bin/python3', ['/usr/bin/python3', '-B', str(BASE/script), *([stage] if stage else []), *argv[1:]], env)
+    unit, seconds, script, args = TESTS[name]
+    unit_absent(unit)
+    return run(['/usr/bin/systemd-run', '--unit=' + unit, *OWNED, '--property=RuntimeMaxSec=%ds' % seconds,
+                '/usr/bin/python3', '-B', str(BASE/script), *args], seconds + 30)
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print('m4-test refused: %s' % error, file=sys.stderr)
+        sys.exit(1)

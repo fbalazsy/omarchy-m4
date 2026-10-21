@@ -1,0 +1,20 @@
+[Unit]
+Description=M4 keyboard light: off after 60 s without input, restored on the first event
+ConditionFirmware=device-tree-compatible(apple,j616s)
+StartLimitIntervalSec=60
+StartLimitBurst=3
+ConditionKernelCommandLine=!m4.safe
+ConditionVirtualization=!container
+After=m4-boot-pending.service
+After=systemd-backlight@leds:apple::kbd_backlight.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -B /usr/lib/m4/kbd-idle.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

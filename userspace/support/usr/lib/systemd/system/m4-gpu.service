@@ -1,0 +1,20 @@
+[Unit]
+Description=M4 GPU: load aurora's GPU driver, asahi (a failure leaves the software greeter; nothing powers the machine off)
+ConditionFirmware=device-tree-compatible(apple,j616s)
+StartLimitIntervalSec=60
+StartLimitBurst=3
+ConditionKernelCommandLine=!m4.safe
+ConditionVirtualization=!container
+After=m4-boot-pending.service
+Documentation=man:m4-support(7)
+After=systemd-udevd.service systemd-modules-load.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/m4/gpu-load
+TimeoutStartSec=90
+
+[Install]
+WantedBy=graphical.target

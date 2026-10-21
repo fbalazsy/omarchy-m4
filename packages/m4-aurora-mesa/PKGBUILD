@@ -1,0 +1,42 @@
+# m4-aurora-mesa: aurora's Mesa (GL, GLES, Honeykrisp Vulkan) for the M4 Pro (T6040) GPU desktop, in the private prefix
+# /opt/aurora-mesa (m4-support links /usr/lib/m4/{session,greeter}-env to the files here).
+#
+# Source: aurora-silicon/mesa agx3b with our T6040 commits, branch m4-t6040-v2 of jgoyvaerts/mesa (M4_MESA_URL overrides it,
+# e.g. file:///path/to/a/mesa/clone). The build-time compilers (mesa_clc, vtn_bindgen2, asahi_clc) are built from the same
+# tree first, so nothing outside this PKGBUILD is needed.
+pkgname=m4-aurora-mesa
+_commit=${M4_MESA_COMMIT:-551e010645ec7f8853a4e8e78358a62a4d686eaa}   # hk: read occlusion results only after their submission completes (G-24)
+pkgver=26.3.0devel.r${_commit:0:8}
+pkgrel=1
+pkgdesc="aurora's Mesa (GL, GLES, Honeykrisp Vulkan) for the M4 Pro GPU desktop, private prefix /opt/aurora-mesa"
+arch=(aarch64)
+url='https://github.com/aurora-silicon/mesa'
+license=(MIT)
+depends=(libdrm wayland expat zlib zstd libglvnd)
+makedepends=(git meson ninja python-mako python-yaml python-packaging glslang wayland-protocols llvm clang libclc spirv-llvm-translator spirv-tools)
+options=(!lto !debug)
+source=("mesa::git+${M4_MESA_URL:-https://github.com/jgoyvaerts/mesa}#commit=$_commit" session-env greeter-env sddm-gpu-aurora.conf)
+sha256sums=(SKIP SKIP SKIP SKIP)
+
+build() {
+  # the build-time compilers of this same tree, in a host prefix under $srcdir
+  meson setup "$srcdir/clc-build" "$srcdir/mesa" -D prefix="$srcdir/clc" -D buildtype=release -D platforms=wayland \
+    -D gallium-drivers=asahi -D vulkan-drivers= -D glx=disabled -D egl=enabled -D gbm=enabled -D gles1=disabled \
+    -D gles2=disabled -D opengl=false -D llvm=enabled -D shared-llvm=enabled -D video-codecs= -D build-tests=false -D tools= \
+    -D mesa-clc=enabled -D install-mesa-clc=true -D precomp-compiler=enabled -D install-precomp-compiler=true
+  meson compile -C "$srcdir/clc-build"
+  meson install -C "$srcdir/clc-build" --quiet
+  export PATH="$srcdir/clc/bin:$PATH"
+  meson setup "$srcdir/build" "$srcdir/mesa" -D prefix=/opt/aurora-mesa -D libdir=lib -D buildtype=release -D b_lto=false \
+    -D platforms=wayland -D gallium-drivers=asahi -D vulkan-drivers=asahi -D glx=disabled -D egl=enabled -D gbm=enabled \
+    -D gles1=disabled -D gles2=enabled -D opengl=true -D glvnd=enabled -D glvnd-vendor-name=mesa -D llvm=disabled \
+    -D valgrind=disabled -D libunwind=disabled -D lmsensors=disabled -D video-codecs= -D gallium-va=disabled \
+    -D build-tests=false -D tools= -D mesa-clc=system -D precomp-compiler=system
+  meson compile -C "$srcdir/build"
+}
+
+package() {
+  meson install -C "$srcdir/build" --destdir "$pkgdir" --quiet
+  rm -rf "$pkgdir/opt/aurora-mesa/include" "$pkgdir/opt/aurora-mesa/lib/pkgconfig"
+  install -m644 "$srcdir/session-env" "$srcdir/greeter-env" "$srcdir/sddm-gpu-aurora.conf" "$pkgdir/opt/aurora-mesa/"
+}

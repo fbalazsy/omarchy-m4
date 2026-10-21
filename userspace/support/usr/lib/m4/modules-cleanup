@@ -1,0 +1,46 @@
+#!/bin/sh
+# modules-cleanup KVER: the distribution's linux-modules-cleanup.service logic (kernel-modules-hook), plus the trees this system boots.
+#
+# The stock ExecStart removes, for every /usr/lib/modules/[0-9]* that is not the running kernel (%v) and that no package owns
+# (`pacman -Qo`), a copy in /usr/lib/modules/.old followed by `rm -rf` -- which also deleted the kept module trees of the boot entries and of
+# the rescue kernel (a native boot: the previous entry and a rescue boot had no modules). Here those are skipped as well:
+#   - the kver of every /boot/m4/entries/*/entry.conf (and the entry's own name),
+#   - the rescue kver (/usr/lib/m4/rescue-kver),
+#   - the kvers m4-boot recorded as kept (/var/lib/m4/kept-trees; m4-boot prune is their only deleter).
+# Everything else is as before. A tree whose copy fails is not removed. M4_MODULES_DIR, M4_ENTRIES_DIR, M4_RESCUE_KVER_FILE and M4_KEPT_TREES
+# exist for the tests.
+running=${1:?usage: modules-cleanup KVER}
+modules=${M4_MODULES_DIR:-/usr/lib/modules}
+entries=${M4_ENTRIES_DIR:-/boot/m4/entries}
+rescue_file=${M4_RESCUE_KVER_FILE:-/usr/lib/m4/rescue-kver}
+kept_file=${M4_KEPT_TREES:-/var/lib/m4/kept-trees}
+
+keep=$(
+    printf '%s\n' "$running"
+    [ -r "$rescue_file" ] && cat "$rescue_file"
+    [ -r "$kept_file" ] && cat "$kept_file"
+    for _e in "$entries"/*/; do
+        [ -d "$_e" ] || continue
+        basename "$_e"
+        [ -r "$_e/entry.conf" ] && sed -n 's/^[[:space:]]*kver[[:space:]]*=[[:space:]]*//p' "$_e/entry.conf"
+    done
+)
+
+status=0
+for i in "$modules"/[0-9]*; do
+    [ -e "$i" ] || continue
+    name=${i##*/}
+    if printf '%s\n' "$keep" | grep -qxF -- "$name"; then
+        continue
+    fi
+    if pacman -Qo "$i" > /dev/null 2>&1; then
+        continue
+    fi
+    if rsync -AHXal "$i" "$modules/.old/"; then
+        rm -rf "$i"
+    else
+        echo "modules-cleanup: could not copy $i aside; left in place" >&2
+        status=1
+    fi
+done
+exit $status

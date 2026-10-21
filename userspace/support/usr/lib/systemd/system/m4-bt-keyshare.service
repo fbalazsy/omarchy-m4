@@ -1,0 +1,14 @@
+[Unit]
+Description=M4 Bluetooth: import the shared macOS/Linux headset link key before bluetoothd
+ConditionKernelCommandLine=!m4.safe
+ConditionVirtualization=!container
+After=m4-boot-pending.service
+Before=bluetooth.service
+ConditionPathExists=/var/lib/m4-shared/bluetooth
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B /usr/lib/m4/bt-keyshare.py
+
+[Install]
+WantedBy=bluetooth.service

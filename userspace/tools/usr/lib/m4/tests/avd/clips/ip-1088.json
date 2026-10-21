@@ -1,0 +1,30 @@
+{
+ "bytes": 90954,
+ "file": "ip-1088.h264",
+ "format": "NV12 per frame, decode order == output order",
+ "frames": [
+  {
+   "index": 0,
+   "nv12_bytes": 3133440,
+   "sha256_i420": "fba49410bb980cd0be56d188c0c7df4a80f94855737fc0378a0a8d5e9ae1bce1",
+   "sha256_nv12": "20c6ffaf7ec8c772ab103b1d74c69ac88dd109368995a364eca9b9e6dfb69e37"
+  },
+  {
+   "index": 1,
+   "nv12_bytes": 3133440,
+   "sha256_i420": "cc590f01329c1cf348b8829d8d5c318433b47e3c59fe6762a3372d009741f808",
+   "sha256_nv12": "ab87897e94941e82f8156f78b70e5e1de9c8ada082102ac644a76ca20848daef"
+  },
+  {
+   "index": 2,
+   "nv12_bytes": 3133440,
+   "sha256_i420": "4912c122b800ee7e6a5830915c289fb1213c3bfcc552748d2959eedc44977ecf",
+   "sha256_nv12": "f7e158dcac87e3bc26c7fac74b2e4d95ca895b6c46ff7d793bad3dc4683dd2bc"
+  }
+ ],
+ "height": 1088,
+ "name": "ip-1088",
+ "profile_idc": 66,
+ "sha256": "22a8820072854fc654964ee913f9838864958346df46ea13af82ded785d8d0ad",
+ "width": 1920
+}

@@ -1,0 +1,12 @@
+# After 20-m4-hyprland-reload-pause.hook: turn Hyprland's config auto-reload back on for the instances it paused. No reload:
+# a reload re-applies the monitor rule (the scale flip that makes the bar render too big); the new file applies at the next login.
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/share/m4/hyprland.lua
+
+[Action]
+Description = Resuming Hyprland config auto-reload...
+When = PostTransaction
+Exec = /usr/bin/python3 -IB /usr/lib/m4/hyprland-reload-guard resume

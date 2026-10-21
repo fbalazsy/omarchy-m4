@@ -1,0 +1,26 @@
+#!/bin/sh
+# The greeter's compositor (sddm's CompositorCommand, run as the sddm user). It never refuses: with the GPU driver loaded the greeter renders on
+# aurora's Mesa, otherwise in software. The qualified greeter path: clear every renderer key the environment inherited, then apply the fixed
+# values; the values are /usr/lib/m4/greeter-env (a link to m4-aurora-mesa's file), the keys /usr/lib/m4/env-keys.
+M4=/usr/lib/m4
+if [ -r "$M4/env-keys" ]; then
+    while IFS= read -r _k; do
+        case $_k in ''|'#'*) ;; *) unset "$_k" ;; esac
+    done < "$M4/env-keys"
+fi
+if [ -e /run/m4/gpu-ready ] && [ -r "$M4/greeter-env" ]; then
+    while IFS='=' read -r _k _v; do
+        case $_k in ''|'#'*) continue ;; esac
+        export "$_k=$_v"
+    done < "$M4/greeter-env"
+else
+    export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe AQ_NO_MODIFIERS=1
+fi
+unset _k _v
+# the KMS card is chosen now, not written down: the display driver's card number depends on what loaded before it
+# shellcheck source=/dev/null
+. "$M4/kms-card.sh"
+_card=$(m4_kms_card)
+[ -z "$_card" ] || export AQ_DRM_DEVICES="$_card"
+unset _card
+exec /usr/bin/start-hyprland -- --config /usr/share/m4/greeter.lua
