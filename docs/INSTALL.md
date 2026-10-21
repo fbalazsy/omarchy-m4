@@ -108,6 +108,13 @@ The rescue system inside the image needs a kernel `Image`, `board.dtb` and an in
    ```
 5. `linux-m4` writes its entry through `m4-boot` and makes it the default. Reboot.
 6. Install Omarchy as usual (the owner used Omarchy's installer, then the `omarchy` repository).
+7. Optional, the speakers' own EQ: the packages use asahi-audio's J316 filters. Your Mac's own tuning (the owner's sound)
+   is rendered from Apple's presets on **your** macOS by `tools/macos/j616-speaker-fir` (its README; macOS 26.6.2). Copy the
+   two WAVs it writes to Linux, then `sudo m4-speakers install DIR` and `systemctl --user restart wireplumber`. They are
+   Apple-derived: keep them on your own machine.
+
+CPU frequency scaling starts by itself (no caps; the power manager's temperature limit regulates). For lower caps, put
+`P_MAX_KHZ=` and `E_MAX_KHZ=` lines (table frequencies) in `/etc/m4/cpufreq.conf`.
 
 ## 5. Updates
 

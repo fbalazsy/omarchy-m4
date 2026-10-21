@@ -1,11 +1,10 @@
 [Unit]
-Description=M4 CPU frequency scaling with caps (opt-in: /etc/m4/cpufreq.conf; gaps G1 capped interim)
+Description=M4 CPU frequency scaling (gaps G1; optional caps in /etc/m4/cpufreq.conf)
 ConditionFirmware=device-tree-compatible(apple,j616s)
 StartLimitIntervalSec=60
 StartLimitBurst=3
 ConditionKernelCommandLine=!m4.safe
 ConditionVirtualization=!container
-ConditionPathExists=/etc/m4/cpufreq.conf
 After=m4-boot-pending.service
 
 [Service]

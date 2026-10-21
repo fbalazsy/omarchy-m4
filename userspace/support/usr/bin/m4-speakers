@@ -1,0 +1,99 @@
+#!/usr/bin/python3 -IB
+"""m4-speakers: use your own Mac's speaker EQ (the FIRs rendered from Apple's presets on your macOS) on the J616 speakers.
+
+  sudo m4-speakers install DIR    DIR holds j616-woofer-L-48000.wav and j616-tweeter-L-48000.wav from
+                                   tools/macos/j616-speaker-fir of the m4-omarchy repository (run on your own macOS)
+  sudo m4-speakers remove         back to the packaged J316 filters
+  m4-speakers status
+
+The FIRs are Apple-derived and never packaged: install copies them to /etc/m4/speakers (what j616-graph-macos.json reads)
+and adds the WirePlumber override that picks that graph. Restart WirePlumber afterwards (systemctl --user restart wireplumber).
+Each WAV must be IEEE float 32-bit, mono, 48 kHz, 8192 frames, as the generator writes them."""
+import os
+import struct
+import sys
+from pathlib import Path
+
+ROOT = Path(os.environ.get('M4_SPEAKERS_ROOT', '/'))        # tests point this at a fake tree
+SPEAKERS = 'etc/m4/speakers'
+OVERRIDE = 'etc/wireplumber/wireplumber.conf.d/99-zz-m4-speakers-macos.conf'
+FILES = {'j616-woofer-L-48000.wav': 'j616-woofer-48000.wav', 'j616-tweeter-L-48000.wav': 'j616-tweeter-48000.wav'}
+FRAMES = 8192
+RULE = '''# m4-speakers: this Mac's own EQ; the FIRs in /etc/m4/speakers come from the owner's macOS (never packaged)
+override.node.software-dsp.rules = [
+  { matches = [ { api.alsa.path = "hw:AppleJ616,1" } ]
+    actions = { create-filter = { filter-path = "/usr/share/m4/speakers/j616-graph-macos.json", hide-parent = true } } }
+]
+'''
+
+
+def check_wav(data):
+    """None if data is a float32 mono 48 kHz WAV of FRAMES frames, else why not."""
+    if len(data) < 12 or data[:4] != b'RIFF' or data[8:12] != b'WAVE':
+        return 'not a RIFF/WAVE file'
+    fmt = frames = None
+    off = 12
+    while off + 8 <= len(data):
+        cid, size = data[off:off + 4], struct.unpack_from('<I', data, off + 4)[0]
+        if cid == b'fmt ' and size >= 16:
+            fmt = struct.unpack_from('<HHIIHH', data, off + 8)
+        elif cid == b'data':
+            frames = min(size, len(data) - off - 8) // 4
+        off += 8 + size + (size & 1)
+    if fmt is None or (fmt[0], fmt[1], fmt[2], fmt[5]) != (3, 1, 48000, 32):
+        return 'not IEEE float 32-bit mono 48 kHz'
+    if frames != FRAMES:
+        return '%s frames, not %d' % (frames, FRAMES)
+    return None
+
+
+def install(src):
+    blobs = {}
+    for name, dest in FILES.items():
+        try:
+            data = (Path(src)/name).read_bytes()
+        except OSError as e:
+            sys.exit('m4-speakers: %s: %s' % (name, e.strerror))
+        why = check_wav(data)
+        if why:
+            sys.exit('m4-speakers: %s: %s' % (name, why))
+        blobs[dest] = data
+    target = ROOT/SPEAKERS
+    target.mkdir(parents=True, exist_ok=True)
+    for dest, data in blobs.items():
+        tmp = target/('.' + dest + '.tmp')
+        tmp.write_bytes(data)
+        tmp.chmod(0o644)
+        os.replace(tmp, target/dest)
+    (ROOT/OVERRIDE).parent.mkdir(parents=True, exist_ok=True)
+    (ROOT/OVERRIDE).write_text(RULE)
+    print('m4-speakers: installed; now run: systemctl --user restart wireplumber')
+
+
+def remove():
+    (ROOT/OVERRIDE).unlink(missing_ok=True)
+    for dest in FILES.values():
+        (ROOT/SPEAKERS/dest).unlink(missing_ok=True)
+    print('m4-speakers: back to the packaged J316 filters; now run: systemctl --user restart wireplumber')
+
+
+def status():
+    have = all((ROOT/SPEAKERS/d).is_file() for d in FILES.values())
+    print('own EQ (j616-graph-macos.json)' if have and (ROOT/OVERRIDE).is_file() else
+          'packaged J316 filters' if not (ROOT/OVERRIDE).is_file() else
+          'BROKEN: the override is set but a FIR in /%s is missing (no speaker sound): run m4-speakers install or remove' % SPEAKERS)
+
+
+def main(argv):
+    if argv[:1] == ['install'] and len(argv) == 2:
+        install(argv[1])
+    elif argv == ['remove']:
+        remove()
+    elif argv in ([], ['status']):
+        status()
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

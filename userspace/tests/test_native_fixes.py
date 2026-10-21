@@ -81,7 +81,7 @@ class Bug03And04And07And11RemovedCode(unittest.TestCase):
         # the only /etc/m4/ files read are the opt-outs that are plain ConditionPathExists / script checks
         allowed = {'aop-off', 'kbd-idle-off', 'idle-off', 'sensors-off', 'als-brightness.conf', 'bluetooth.conf', 'mkinitcpio.conf', 'cmdline',
                    'greeter-kb-layout',
-                   'cpufreq.conf',                     # m4-cpufreq.service's opt-in and caps (gaps G1 capped interim)
+                   'cpufreq.conf',                     # m4-cpufreq.service's optional caps (gaps G1)
                    'gpu-idle.conf',                     # gpu-idle-power's optional AC/battery idle hold (G-13)
                    'speakers'}                          # the owner's local FIRs for j616-graph-macos.json (never packaged)
         found = set()

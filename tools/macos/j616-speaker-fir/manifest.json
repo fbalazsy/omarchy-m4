@@ -1,0 +1,237 @@
+{
+  "board": "apple,j616s",
+  "schema": 1,
+  "description": "J616 (Mac16,7, T6040) speaker EQ filters from AID35 (speakerID 3). Pins are recorded from what the owner-Mac measured (lane SF, 2026-10-21); regenerate with --record-pins after review.",
+  "reference_tool": {
+    "repo": "https://github.com/Kb2uka/Omarchy-M4-Native",
+    "commit": "b92f048f7f41227e600431926395e3dfe2d7f070",
+    "path": "audio/j713/owner-fir"
+  },
+  "pins": {
+    "helper": {
+      "sha256": "c1f598af46d4d6aec3a3b7df1117bfee699b9d9465cfb8e3725f6680a4cad046",
+      "size": 35816
+    },
+    "inputs": {
+      "AudioDSP": {
+        "path": "/System/Library/Components/AudioDSP.component/Contents/MacOS/AudioDSP",
+        "sha256": "b8711ac5c284751b343a9b2ea23799107225f5aadb7dcbfb68be1134508f64a6",
+        "size": 17311312,
+        "macos": "26.6.2 (25G83)"
+      },
+      "builtin_speaker_out.dspg": {
+        "sha256": "e66176777b0bf228059e1d747725a1d6c7a16d1e83971373b3ec4d1816eba2a9",
+        "size": 6109
+      },
+      "builtin_speaker_out_general.austrip": {
+        "sha256": "723be18b0633e3dd12dbe06d898aff1993deeed66234135be8568db5a35b8d0e",
+        "size": 57973
+      },
+      "builtin_speaker_out_general.propstrip": {
+        "sha256": "1c9109e3cde9d3d8818fab8053cd6d81b045ecbd251fe891b3d0b63fb250dc2a",
+        "size": 234
+      },
+      "builtin_speaker_out_general_3.austrip": {
+        "sha256": "723be18b0633e3dd12dbe06d898aff1993deeed66234135be8568db5a35b8d0e",
+        "size": 57973
+      }
+    },
+    "outputs": {
+      "j616-tweeter-L-48000.wav": {
+        "sha256": "2a26fdefc3339fa4c9c6b8376ff06dd388074a714e0e6d7cd248843ac9e52f00",
+        "size": 32824,
+        "taps": 8192
+      },
+      "j616-tweeter-R-48000.wav": {
+        "sha256": "2a26fdefc3339fa4c9c6b8376ff06dd388074a714e0e6d7cd248843ac9e52f00",
+        "size": 32824,
+        "taps": 8192
+      },
+      "j616-woofer-L-48000.wav": {
+        "sha256": "dbe5641aff193cb3217b771d85e1381137186dae524451605295c6a9c958d22d",
+        "size": 32824,
+        "taps": 8192
+      },
+      "j616-woofer-R-48000.wav": {
+        "sha256": "dbe5641aff193cb3217b771d85e1381137186dae524451605295c6a9c958d22d",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.00/j616-tweeter-L-48000.wav": {
+        "sha256": "39ef1505d9b1433b13464f0c65fa195675c86c856b200c40af50a72d61fd2d72",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.00/j616-tweeter-R-48000.wav": {
+        "sha256": "39ef1505d9b1433b13464f0c65fa195675c86c856b200c40af50a72d61fd2d72",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.00/j616-woofer-L-48000.wav": {
+        "sha256": "f631ffbbc49507fdc4f6d1cefc6cc227b6e3f0f1156d3abe6ec7f9773412dbe6",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.00/j616-woofer-R-48000.wav": {
+        "sha256": "f631ffbbc49507fdc4f6d1cefc6cc227b6e3f0f1156d3abe6ec7f9773412dbe6",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.25/j616-tweeter-L-48000.wav": {
+        "sha256": "26fbea97665551324f6ffaee7a7e6276abaf37f2f002538b918b52e8e17e1b75",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.25/j616-tweeter-R-48000.wav": {
+        "sha256": "26fbea97665551324f6ffaee7a7e6276abaf37f2f002538b918b52e8e17e1b75",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.25/j616-woofer-L-48000.wav": {
+        "sha256": "a24ff468e58d42c7480f9fac4e6aa413307ca5e9a961d251e192497f7a5f2ab0",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.25/j616-woofer-R-48000.wav": {
+        "sha256": "a24ff468e58d42c7480f9fac4e6aa413307ca5e9a961d251e192497f7a5f2ab0",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.50/j616-tweeter-L-48000.wav": {
+        "sha256": "95595e100c3a798820d2da0c4feaa178cdf9d35c0f04319944748291e1b4a272",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.50/j616-tweeter-R-48000.wav": {
+        "sha256": "95595e100c3a798820d2da0c4feaa178cdf9d35c0f04319944748291e1b4a272",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.50/j616-woofer-L-48000.wav": {
+        "sha256": "ddc0564dbcc5d4a51c3986442b3b3e27563ace3ebe555813b5df84d03dc3afa6",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.50/j616-woofer-R-48000.wav": {
+        "sha256": "ddc0564dbcc5d4a51c3986442b3b3e27563ace3ebe555813b5df84d03dc3afa6",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.75/j616-tweeter-L-48000.wav": {
+        "sha256": "2e9b4fc304ac4c1f32a83967979feb5112265701e925a2bc5a19f22dc391055f",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.75/j616-tweeter-R-48000.wav": {
+        "sha256": "2e9b4fc304ac4c1f32a83967979feb5112265701e925a2bc5a19f22dc391055f",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.75/j616-woofer-L-48000.wav": {
+        "sha256": "94b2875e83f995b38bb08fd82d887318d74ca0431a6176bb93dcb070e3cf82f2",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/cg0.75/j616-woofer-R-48000.wav": {
+        "sha256": "94b2875e83f995b38bb08fd82d887318d74ca0431a6176bb93dcb070e3cf82f2",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/no-vareq/j616-tweeter-L-48000.wav": {
+        "sha256": "ce861d16155fee971ce8a541922d3f41517fe256757ab04e3ca7e588cdbd81b8",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/no-vareq/j616-tweeter-R-48000.wav": {
+        "sha256": "ce861d16155fee971ce8a541922d3f41517fe256757ab04e3ca7e588cdbd81b8",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/no-vareq/j616-woofer-L-48000.wav": {
+        "sha256": "c529e521c990f6aa47c40478d618524437a07472218d3f04b4aa66fc6eea3e5c",
+        "size": 32824,
+        "taps": 8192
+      },
+      "variants/no-vareq/j616-woofer-R-48000.wav": {
+        "sha256": "c529e521c990f6aa47c40478d618524437a07472218d3f04b4aa66fc6eea3e5c",
+        "size": 32824,
+        "taps": 8192
+      }
+    },
+    "presets": {
+      "Tone1": {
+        "sha256": "4fbdd7f8f6f66a48c634250a333981ee90ad9b5f7373c8fad4e2414e381f492d"
+      },
+      "Tone2": {
+        "sha256": "2d4e4cc78c920b901d45cc55ba59702f04c299b3fc75fe60b9300381da097dbd"
+      },
+      "VarEQ": {
+        "sha256": "6220e29afcf885d38ccaa214a6afc338ccc0d777a8808c2e335f0fea4a2704ac"
+      },
+      "analytical": {
+        "sha256": "019c3ce94c41cc5676c05d6c600726f9ed8fadb6fdd7d7a5bd18b67aa852dd25"
+      }
+    }
+  },
+  "python_tested": "3.13.2 (Homebrew, arm64) with numpy 2.5.3 (wheel numpy-2.5.3-cp313-cp313-macosx_14_0_arm64.whl, as pinned by the J713 tool; the J713 tool itself pins CPython 3.13.9, not available here)",
+  "sources": {
+    "au-inspect.c": {
+      "sha256": "c45303a96d8ff5dd0131fa3843e82327bb2946de702e5bd55152a09e34c49221",
+      "size": 2859
+    },
+    "decode_filters.py": {
+      "sha256": "2b8e33ee12eea860fb7dee13d40299fca09a9081f473af6e125792d07653b30f",
+      "size": 2995
+    },
+    "inspect_strip_j616.py": {
+      "sha256": "447cfe7bd16f5a9c1901b1071bfc5413d1d51a22da8e6932303beed5d911ae7c",
+      "size": 2962
+    },
+    "j616_common.py": {
+      "sha256": "bc1d48fbf0e3595bb754adc05e86a5d0a86d46f38d2eebf2056862d67a0c8c3a",
+      "size": 5734
+    },
+    "make_receipt.py": {
+      "sha256": "401faa6a5f38fc22cb363054299fc8f1fce28605666a083401937b89dddaf70d",
+      "size": 6042
+    },
+    "make_tables.py": {
+      "sha256": "942014876d2c75a3b94fd5fd7d20d8316665f3c4290c3ad12fb26abeeaea7484",
+      "size": 6291
+    },
+    "measure-au.c": {
+      "sha256": "e1a291bbb30af301ce42bbcf0865de8680136a75f01e19fd9d322ec03eaf91e7",
+      "size": 11752
+    },
+    "q1_inventory.py": {
+      "sha256": "a4f8236ee0a85e6f5fefe10e79f73415a2c0ac1756ae7f04e444ce9b645df5fe",
+      "size": 12815
+    },
+    "render_q1_md.py": {
+      "sha256": "13bdb83ba2d027c0f737031919edab2115dcfeca0fb254a667d15c42372fae24",
+      "size": 8316
+    },
+    "run_j616.py": {
+      "sha256": "e642c514c75d63dd4398d30ab4f8e603ed8cdb346245041078930dbc6c0573a9",
+      "size": 19678
+    },
+    "stage_noise_check.py": {
+      "sha256": "2dd0fe28cda12a78cb640b3e3676ba6508ec78733688b5a33ec285bf70dd3419",
+      "size": 2438
+    }
+  },
+  "measure_range": {
+    "primary_set": "cg1.00",
+    "variants": [
+      "cg0.75",
+      "cg0.50",
+      "cg0.25",
+      "cg0.00",
+      "no-vareq"
+    ]
+  },
+  "notes": [
+    "Pins are what the owner-Mac measured on 2026-10-21; this is a one-unit qualification (macOS 26.6.2 / 25G83, AudioDSP b8711ac5...).",
+    "AudioDSP renders are not bit-reproducible on a busy machine (denormal-range tails and rare 1-ULP differences, <= ~1e-7 of the peak); of 15 complete runs 14 produced byte-identical FIR files and one a different tweeter hash; run_j616.py --reference-dir accepts a run within 1e-6 of the reference peak."
+  ]
+}

@@ -130,8 +130,11 @@ class Start(unittest.TestCase):
         self.assertEqual(self.writes, [])
         self.assertEqual(tree.state(), before)
 
-    def test_no_conf(self):
-        self.assertRefusedUntouched(Tree(self.dir.name, conf=None), 'is missing')
+    def test_no_conf_means_no_caps(self):
+        t = Tree(self.dir.name, conf=None)
+        self.assertEqual(self.run_start(), 0)
+        self.assertEqual(t.state(), {'policy0': ('%d' % max(P_KHZ), 'schedutil'), 'policy1': ('%d' % max(E_KHZ), 'schedutil'),
+                                     'policy5': ('%d' % max(P_KHZ), 'schedutil')})
 
     def test_conf_needs_both_caps(self):
         self.assertRefusedUntouched(Tree(self.dir.name, conf='P_MAX_KHZ=2616000\n'), 'needs P_MAX_KHZ and E_MAX_KHZ')
@@ -162,7 +165,7 @@ class Unit(unittest.TestCase):
     def test_conditions_and_link(self):
         lines = UNIT.read_text().splitlines()
         for line in ('ConditionFirmware=device-tree-compatible(apple,j616s)', 'ConditionKernelCommandLine=!m4.safe',
-                     'ConditionPathExists=/etc/m4/cpufreq.conf', 'ExecStart=/usr/bin/python3 -IB /usr/lib/m4/cpufreq-start'):
+                     'ExecStart=/usr/bin/python3 -IB /usr/lib/m4/cpufreq-start'):
             self.assertIn(line, lines)
         link = UNIT.parent/'multi-user.target.wants/m4-cpufreq.service'
         self.assertTrue(link.is_symlink() and str(link.readlink()) == '../m4-cpufreq.service')
