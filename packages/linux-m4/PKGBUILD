@@ -92,6 +92,8 @@ build() {
   _ts=$(git log -1 --format=%cd --date=format:'%a %b %e %H:%M:%S UTC %Y')
   export KBUILD_BUILD_TIMESTAMP="$_ts"
   export KBUILD_BUILD_USER=m4 KBUILD_BUILD_HOST=m4-n1 KBUILD_BUILD_VERSION="$pkgrel"
+  # the Rust core library is compiled from the builder's rustup sysroot: keep its home path out of the panic locations
+  export KRUSTFLAGS="--remap-path-prefix=$HOME=/build"
   make ARCH=arm64 BINDGEN="$_bindgen" -j"$(nproc)" Image modules dtbs
 }
 
