@@ -11,6 +11,8 @@
   m4-boot prune                               keep the default and the previous entry only
   m4-boot rescue --out FILE [--kver K]        build the rescue initramfs (the loader embeds it)
   m4-boot keep save|restore|list              module trees that survive a linux-m4 upgrade (the libalpm hooks of m4-support call save and restore)
+  m4-boot m1n1 add FILE [--name N] | remove N  an m1n1 entry (loader rev 17: type=m1n1, one file m1n1.bin); never the default
+  m4-boot oneshot ENTRY | --clear             boot ENTRY once on the next boot (loader rev 17); a hung test is undone by a forced power-off
 
 Only this tool writes /boot/m4. An entry is written under a temporary name, its files and the directory are fsynced, it is renamed into
 place, and only then `loader.conf` is replaced the same way: a power cut leaves the old default intact. The entry's command line is
@@ -74,6 +76,8 @@ DTB_MAX_CEILING = 131072       # the loader's FDT slot (rev 12: 128 KiB); a publ
 CMDLINE_MAX = 1024
 FS_IOC_GETFSUUID = 0x80111500                   # _IOR(0x15, 0, struct fsuuid2 { __u8 len; __u8 uuid[16]; })
 LOADER_CONF_MAX = 4096
+M1N1_FILE = 'm1n1.bin'          # loader rev 17, entry.conf type=m1n1: m1n1.bin_size, m1n1.bin_crc32 (verified by the loader), m1n1.bin_sha256 (here)
+ONESHOT_BYTES = 4096            # loader rev 17: /boot/m4/oneshot is exactly one 4 KiB block; the loader rewrites armed -> spent in place
 FILES = ('Image', 'initramfs.img', 'board.dtb')    # entry.conf keys: <file>_size, <file>_crc32 (verified by the loader), <file>_sha256 (verified here)
 DEFAULT_CMDLINE = '/etc/m4/cmdline'
 PACKAGE_CMDLINE = '/usr/share/m4/cmdline'
@@ -257,6 +261,50 @@ def reason_text(reason):
         if reason and key in reason:
             return text
     return 'the loader chose its rescue set (reason: %s)' % (reason or 'not reported')
+
+
+FDT_MAGIC = 0xd00dfeed
+NVME_GUARD_OVERRIDE = 'M4_BOOT_ALLOW_NVME_CHANGE'
+
+
+def fdt_root_node_prop(blob, prefix, prop):
+    """PROP of the first top-level node whose name starts with PREFIX in a flattened device tree, or None (also for a blob that
+    is not an FDT)."""
+    try:
+        if len(blob) < 40 or struct.unpack_from('>I', blob, 0)[0] != FDT_MAGIC:
+            return None
+        off_struct, off_strings = struct.unpack_from('>II', blob, 8)
+        size_struct = struct.unpack_from('>I', blob, 36)[0]
+        p, end, depth, match = off_struct, off_struct + size_struct, 0, False
+        while p + 4 <= end:
+            token = struct.unpack_from('>I', blob, p)[0]
+            p += 4
+            if token == 1:                                  # FDT_BEGIN_NODE
+                e = blob.index(b'\0', p)
+                depth += 1
+                if depth == 2:
+                    match = blob[p:e].decode('ascii', 'replace').startswith(prefix)
+                p = (e + 1 + 3) & ~3
+            elif token == 2:                                # FDT_END_NODE
+                if depth == 2 and match:
+                    return None
+                depth -= 1
+            elif token == 3:                                # FDT_PROP
+                length, nameoff = struct.unpack_from('>II', blob, p)
+                p += 8
+                value = blob[p:p + length]
+                p = (p + length + 3) & ~3
+                if depth == 2 and match:
+                    n = off_strings + nameoff
+                    if blob[n:blob.index(b'\0', n)].decode('ascii', 'replace') == prop:
+                        return value
+            elif token == 4:                                # FDT_NOP
+                continue
+            else:                                           # FDT_END or garbage
+                return None
+    except (struct.error, ValueError):
+        return None
+    return None
 
 
 class Boot:
@@ -486,6 +534,11 @@ class Boot:
             return ['entry.conf missing']
         if conf.get('abi') != str(ABI):
             problems.append('abi=%s' % conf.get('abi'))
+        kind = conf.get('type', 'linux')
+        if kind == 'm1n1':
+            return problems + self.verify_file(d, conf, M1N1_FILE, IMAGE_MAX)
+        if kind != 'linux':
+            return problems + ['type=%s' % kind]
         if not conf.get('kver'):
             problems.append('kver missing')
         cmd = conf.get('cmdline', '')
@@ -508,6 +561,88 @@ class Boot:
             elif sha256_file(p) != conf.get(f + '_sha256'):
                 problems.append(f + ' sha256 differs from entry.conf')
         return problems
+
+    def verify_file(self, d, conf, f, window):
+        p = d/f
+        try:
+            size = p.stat().st_size
+        except OSError:
+            return [f + ' missing']
+        if size > window:
+            return ['%s is %d B, window %d' % (f, size, window)]
+        if str(size) != conf.get(f + '_size'):
+            return [f + ' size differs from entry.conf']
+        if crc32_file(p) != conf.get(f + '_crc32'):
+            return [f + ' crc32 differs from entry.conf']
+        if sha256_file(p) != conf.get(f + '_sha256'):
+            return [f + ' sha256 differs from entry.conf']
+        return []
+
+    def is_m1n1(self, name):
+        try:
+            return parse_conf((self.entries/name/'entry.conf').read_text()).get('type') == 'm1n1'
+        except OSError:
+            return False
+
+    def kernel_entries(self):
+        """The entries that boot a Linux kernel (m1n1 entries are test stages: no module tree, no rollback, never pruned here)."""
+        return [n for n in self.entry_names() if not self.is_m1n1(n)]
+
+    # ---- m1n1 entries and the one-shot token (loader rev 17) ----------------------------------------------------------------
+    def m1n1_add(self, src, name=None):
+        data = Path(src).read_bytes()
+        need(64 <= len(data) <= IMAGE_MAX, '%s is %d B: an m1n1 image is 64 B .. %d B' % (src, len(data), IMAGE_MAX))
+        sha = hashlib.sha256(data).hexdigest()
+        name = name or 'm1n1-' + sha[:12]
+        need(valid_name(name), 'entry name %r is not valid' % name)
+        need(not (self.entries/name).exists(), 'entry %s exists' % name)
+        self.entries.mkdir(parents=True, exist_ok=True)
+        tmp = self.entries/('.tmp-' + name)
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir()
+        (tmp/M1N1_FILE).write_bytes(data)
+        fsync_path(tmp/M1N1_FILE)
+        conf = 'abi=%d\ntype=m1n1\nkver=m1n1\n%s_size=%d\n%s_crc32=%s\n%s_sha256=%s\n' % (
+            ABI, M1N1_FILE, len(data), M1N1_FILE, crc32_file(tmp/M1N1_FILE), M1N1_FILE, sha)
+        (tmp/'entry.conf').write_text(conf)
+        fsync_path(tmp/'entry.conf')
+        fsync_path(tmp, directory=True)
+        problems = self.verify_entry(name, base=tmp)
+        need(not problems, 'the new entry does not verify: ' + '; '.join(problems))
+        os.rename(tmp, self.entries/name)
+        fsync_path(self.entries, directory=True)
+        return name
+
+    def m1n1_remove(self, name):
+        need(valid_name(name) and self.is_m1n1(name), 'no m1n1 entry %s' % name)
+        state = self.oneshot_state()
+        need(not (state and state[0] == 'armed' and state[1] == name), 'the armed one-shot token names %s: m4-boot oneshot --clear first' % name)
+        shutil.rmtree(self.entries/name)
+        fsync_path(self.entries, directory=True)
+
+    def oneshot_state(self):
+        """(state, entry) of /boot/m4/oneshot, or None when there is no token."""
+        try:
+            data = (self.root/'oneshot').read_bytes()
+        except OSError:
+            return None
+        conf = parse_conf(data.split(b'\0', 1)[0].decode('ascii', 'replace'))
+        return (conf.get('m4_oneshot', '?') if len(data) == ONESHOT_BYTES else 'bad-size', conf.get('entry'))
+
+    def oneshot_arm(self, name):
+        need(valid_name(name) and (self.entries/name).is_dir(), 'no entry %s' % name)
+        problems = self.verify_entry(name)
+        need(not problems, 'entry %s does not verify: %s' % (name, '; '.join(problems)))
+        token = ('m4_oneshot=armed\nentry=%s\n' % name).encode()
+        write_atomic(self.root/'oneshot', token.ljust(ONESHOT_BYTES, b'\0'))
+
+    def oneshot_clear(self):
+        try:
+            (self.root/'oneshot').unlink()
+        except FileNotFoundError:
+            return False
+        fsync_path(self.root, directory=True)
+        return True
 
     # ---- writing ------------------------------------------------------------------------------------------------------------
     def cmdline(self):
@@ -629,6 +764,7 @@ class Boot:
         need(len(image) <= IMAGE_MAX, 'Image is %d B, the loader window is %d B' % (len(image), IMAGE_MAX))
         dtb_bytes = dtb.read_bytes()
         need(0 < len(dtb_bytes) <= DTB_MAX, 'board.dtb is %d B, the window is %d B' % (len(dtb_bytes), DTB_MAX))
+        self.nvme_binding_check(kver, dtb_bytes)
         self.entries.mkdir(parents=True, exist_ok=True)
         self.sweep()
         self.keep_restore()
@@ -672,6 +808,27 @@ class Boot:
             name, 'rebuilt in place' if existing else 'written', len(image), len(ram), len(dtb_bytes), ', default' if make_default else ''))
         return name
 
+    def nvme_binding_check(self, kver, dtb_bytes):
+        """On a machine the M4 loader booted, the new board.dtb must keep the running NVMe binding (its first compatible). The loader
+        leaves ANS running and hands it over through that binding (m4,ans-live, the partition write guard); a kernel whose tree binds
+        the SSD otherwise cold-starts ANS, gets no root and is booted again and again: 7.3.0-fbtest.1 (2026-10-23, compatible
+        apple,t6041-nvme-ans2 instead of lab,j616-nvme-partition-25g83) needed One True Recovery. M4_BOOT_ALLOW_NVME_CHANGE=1 skips
+        this once the new binding is known to adopt the loader's session."""
+        dt = Path(self.chosen).parent
+        if not (Path(self.chosen)/'m4,loader-version').exists() or os.environ.get(NVME_GUARD_OVERRIDE) == '1':
+            return
+        live = sorted(dt.glob('nvme@*/compatible'))
+        if not live:
+            return
+        running = live[0].read_bytes().split(b'\0')[0].decode('ascii', 'replace')
+        if not running:
+            return
+        raw = fdt_root_node_prop(dtb_bytes, 'nvme@', 'compatible')
+        new = [] if raw is None else [x.decode('ascii', 'replace') for x in raw.split(b'\0') if x]
+        need(running in new, 'board.dtb of %s binds the NVMe controller as %s, not as the running %s: that kernel could not take the SSD over '
+             'from the M4 loader (no root, a boot loop). Nothing was written. Override only for a binding known to adopt the loader\'s ANS '
+             'session: %s=1' % (kver, ', '.join(new) or 'nothing', running, NVME_GUARD_OVERRIDE))
+
     def replace_entry(self, tmp, final):
         """Put the verified TMP directory in place of FINAL: an atomic exchange, else FINAL is renamed aside first (sweep restores it)."""
         if exchange_dirs(tmp, final):
@@ -691,7 +848,7 @@ class Boot:
 
     def entry_for_kver(self, kver):
         """The entry that boots KVER: the one named like it, else the newest."""
-        names = [n for n in self.entry_names() if self.entry_kver(n) == kver]
+        names = [n for n in self.kernel_entries() if self.entry_kver(n) == kver]
         if kver in names:
             return kver
         return names[-1] if names else None
@@ -700,7 +857,7 @@ class Boot:
         """The entries to keep around PRIMARY (the default): itself, the entry of another kver that was the default before (else the newest
         of another kver: the rollback) and the rescue kver's entry while its module tree exists. Same-kver duplicates of PRIMARY are not kept."""
         pk = self.entry_kver(primary)
-        others = [n for n in self.entry_names() if n != primary and self.entry_kver(n) != pk]      # oldest first
+        others = [n for n in self.kernel_entries() if n != primary and self.entry_kver(n) != pk]      # oldest first
         keep = [primary]
         if previous_default in others:
             keep.append(previous_default)
@@ -725,6 +882,7 @@ class Boot:
 
     def set_default(self, name):
         need(valid_name(name) and (self.entries/name).is_dir(), 'no entry %s' % name)
+        need(not self.is_m1n1(name), '%s is an m1n1 entry: it is never the default (a hang would repeat on every boot); use m4-boot oneshot %s' % (name, name))
         problems = self.verify_entry(name)
         need(not problems, 'entry %s does not verify: %s' % (name, '; '.join(problems)))
         write_atomic(self.root/'loader.conf', ('abi=%d\ndefault=%s\n' % (ABI, name)).encode())
@@ -742,7 +900,7 @@ class Boot:
     def entry_kvers(self):
         """The kver of every entry (entry.conf kver=, else the entry's name)."""
         found = set()
-        for name in self.entry_names():
+        for name in self.kernel_entries():
             try:
                 kver = parse_conf((self.entries/name/'entry.conf').read_text()).get('kver')
             except OSError:
@@ -893,9 +1051,9 @@ class Boot:
             if current and (self.entries/current).is_dir():
                 keep = self.keep_entries(current)
             else:
-                names = self.entry_names()
+                names = self.kernel_entries()
                 keep = names[-2:]
-        for name in self.entry_names():
+        for name in self.kernel_entries():
             if name not in keep:
                 shutil.rmtree(self.entries/name, ignore_errors=True)
         for p in self.entries.glob('.tmp-*') if self.entries.is_dir() else []:
@@ -908,7 +1066,7 @@ class Boot:
         """The rollback: the newest entry of another kver than the default's (a same-kver duplicate is not a rollback)."""
         current = self.default()
         ck = self.entry_kver(current) if current else None
-        others = [n for n in self.entry_names() if n != current and self.entry_kver(n) != ck]
+        others = [n for n in self.kernel_entries() if n != current and self.entry_kver(n) != ck]
         return others[-1] if others else None
 
 
@@ -954,6 +1112,13 @@ def main(argv, out=print, clock=time.monotonic, sleep=time.sleep):
     p = sub.add_parser('rescue')
     p.add_argument('--out', required=True)
     p.add_argument('--kver')
+    p = sub.add_parser('m1n1')
+    p.add_argument('action', choices=('add', 'remove'))
+    p.add_argument('target', help='add: the m1n1 image (m1n1.bin, payloads appended if wanted); remove: the entry')
+    p.add_argument('--name')
+    p = sub.add_parser('oneshot')
+    p.add_argument('entry', nargs='?')
+    p.add_argument('--clear', action='store_true')
     try:
         a = ap.parse_args(argv)
     except SystemExit as exit_:
@@ -994,6 +1159,12 @@ def main(argv, out=print, clock=time.monotonic, sleep=time.sleep):
                 out('to start the normal system again: sudo m4-boot select %s   (or: sudo m4-boot clear)' % default)
             else:
                 out('default %s: the loader will boot it' % default)
+            token = b.oneshot_state()
+            if token:
+                out('one-shot token: %s %s%s' % (token[0], token[1] or '?', '   (the next boot starts it once)' if token[0] == 'armed' and pending is None else ''))
+            last = dt_string('m4,boot-oneshot', chosen=a.chosen)
+            if last:
+                out('this boot: one-shot token %s' % last)
             return 0 if not problems and pending is None else 1
         elif a.cmd == 'clear':
             out('m4-boot: boot-pending %s' % ('removed' if b.pending_clear() else 'was not set'))
@@ -1021,6 +1192,25 @@ def main(argv, out=print, clock=time.monotonic, sleep=time.sleep):
                 out('rescue kernel: %s%s' % (rescue or '(none)', '' if not rescue or (b.modules/rescue/'vmlinuz').is_file() else '   MODULE TREE MISSING'))
                 out('entries: %s' % (', '.join(sorted(b.entry_kvers())) or '(none)'))
                 out('kept trees (restored by this tool, unowned): %s' % (', '.join(b.kept()) or '(none)'))
+        elif a.cmd == 'm1n1':
+            if a.action == 'add':
+                out('m4-boot: m1n1 entry %s' % b.m1n1_add(a.target, a.name))
+            else:
+                b.m1n1_remove(a.target)
+                out('m4-boot: removed m1n1 entry %s' % a.target)
+        elif a.cmd == 'oneshot':
+            if a.clear:
+                out('m4-boot: one-shot token %s' % ('removed' if b.oneshot_clear() else 'was not set'))
+            else:
+                need(a.entry, 'name the entry to boot once (or --clear)')
+                b.oneshot_arm(a.entry)
+                out('m4-boot: the next boot starts %s once, then the default again' % a.entry)
+                version = dt_string('m4,loader-version', chosen=a.chosen)
+                m = re.match(r'rev(\d+)$', version or '')
+                if not m or int(m.group(1)) < 17:
+                    out('m4-boot: note: the installed loader (%s) predates rev 17 and ignores the token' % (version or 'unknown'))
+                if b.pending() is not None:
+                    out('m4-boot: note: boot-pending is set, so the next boot is a rescue boot and the token waits (m4-boot clear)')
         elif a.cmd == 'rescue':
             kver = a.kver or newest_kver(b.modules)
             b.build_initramfs(kver, a.out, config=RESCUE_CONF)

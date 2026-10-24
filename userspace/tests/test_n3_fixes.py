@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""N3 lane U: A (sddm configuration order), B (the greeter path, now on m4-aurora-mesa's files), G (the KMS card), E (linux-modules-cleanup).   python3 -B -I test_n3_fixes.py
+"""N3 lane U: A (sddm configuration order), B (the greeter path on the system Mesa), G (the KMS card), E (linux-modules-cleanup).   python3 -B -I test_n3_fixes.py
 
 The owner's real files are in tests/inputs/n3 (copied from /reports/n3/inputs): Omarchy's 10-theme.conf and 10-wayland.conf, sddm's default.conf and
 kernel-modules-hook's linux-modules-cleanup.service."""
@@ -17,8 +17,11 @@ ROOT = HERE.parent
 SUPPORT = ROOT/'support'
 INPUTS = HERE/'inputs/n3'
 M4 = SUPPORT/'usr/lib/m4'
-AURORA = ROOT.parent/'packages/m4-aurora-mesa'     # the package's session-env, greeter-env and sddm-gpu-aurora.conf
-AURORA_PREFIX = '/opt/aurora-mesa'
+AURORA = M4     # m4-support's session-env, greeter-env and sddm-gpu.conf (the GPU driver is the system Mesa, m4-aurora-mesa)
+MESA_PKGBUILD = ROOT.parent/'packages/m4-aurora-mesa/PKGBUILD'
+# what the private /opt/aurora-mesa setup exported and the system Mesa makes unnecessary
+DRIVER_KEYS = ('LD_LIBRARY_PATH', 'GBM_BACKENDS_PATH', '__EGL_VENDOR_LIBRARY_FILENAMES', 'VK_DRIVER_FILES', 'ASAHI_MESA_DEBUG',
+               'ASAHI_G17P_RT_DISABLE')
 
 
 def kv(path):
@@ -104,7 +107,7 @@ class A_ConfigurationOrder(unittest.TestCase):
         self.assertNotIn('etc/sddm.conf.d/10-m4.conf', pkgbuild)
 
     def test_the_gpu_configuration_has_only_keys_nobody_else_sets_and_sorts_before_ours(self):
-        gpu = sddm_merge([AURORA/'sddm-gpu-aurora.conf'])        # linked as zz-m4-gpu.conf by gpu-load
+        gpu = sddm_merge([AURORA/'sddm-gpu.conf'])        # linked as zz-m4-gpu.conf by gpu-load
         ours = sddm_merge([SUPPORT/'etc/sddm.conf.d/zz-m4.conf'])
         for section in gpu.sections():
             for key in gpu[section]:
@@ -172,24 +175,29 @@ def kms_tree(case, cards, bypath=True):
 
 
 class B_GreeterOnAurora(unittest.TestCase):
-    """The session and greeter environments are m4-aurora-mesa's files (single source of truth); m4-support only links to them."""
-    def test_the_environment_files_link_to_m4_aurora_mesa(self):
-        for n in ('session-env', 'greeter-env'):
-            self.assertTrue((M4/n).is_symlink(), n)
-            self.assertEqual(os.readlink(M4/n), AURORA_PREFIX + '/' + n)
+    """The GPU driver is the system Mesa (m4-aurora-mesa, m4-aurora-vulkan); m4-support's environments carry toolkit choices only."""
+    def test_the_environment_files_are_m4_supports_own_and_it_needs_the_system_mesa(self):
+        for n in ('session-env', 'greeter-env', 'sddm-gpu.conf'):
+            self.assertTrue((M4/n).is_file() and not (M4/n).is_symlink(), n)
         depends = (ROOT.parent/'packages/m4-support/PKGBUILD').read_text().split('depends=(', 1)[1].split(')', 1)[0].split()
         self.assertIn('m4-aurora-mesa', depends)
+        self.assertIn('m4-aurora-vulkan', depends)
         self.assertNotIn('m4-mesa', depends)
         self.assertFalse((SUPPORT/'usr/share/m4/sddm-gpu.conf').exists())
         self.assertFalse((SUPPORT/'usr/lib/modprobe.d/m4-gpu.conf').exists())
 
-    def test_the_aurora_environment_points_at_aurora_mesa_only_and_keeps_1queue(self):
+    def test_no_environment_selects_the_driver_and_the_mesa_package_is_the_system_mesa(self):
         for n in ('session-env', 'greeter-env'):
             env = kv(AURORA/n)
-            for k in ('LD_LIBRARY_PATH', 'GBM_BACKENDS_PATH', '__EGL_VENDOR_LIBRARY_FILENAMES', 'VK_DRIVER_FILES'):
-                self.assertTrue(env[k].startswith(AURORA_PREFIX + '/'), (n, k))
-            self.assertIn('1queue', env['ASAHI_MESA_DEBUG'].split(','), n)    # the 25G83 firmware asserts on a second render queue
+            self.assertFalse([k for k in DRIVER_KEYS if k in env], n)
             self.assertFalse([k for k in env if 'G16X' in k or k.startswith('AGX_APPLE9_')], n)
+        self.assertNotIn('/opt/', (M4/'sddm-gpu.conf').read_text())
+        mesa = MESA_PKGBUILD.read_text()
+        self.assertIn('--prefix /usr', mesa)
+        self.assertIn('conflicts=(mesa)', mesa)
+        self.assertNotIn('/opt/aurora-mesa', mesa)
+        # the 25G83 firmware asserts on a second render queue: the source makes 1queue the T6040 default
+        self.assertIn('1queue', mesa)
 
     def test_cleared_keys_cover_every_key_the_greeter_and_the_session_set(self):
         keys = [l for l in (M4/'env-keys').read_text().splitlines() if l and not l.startswith('#')]
@@ -203,13 +211,11 @@ class B_GreeterOnAurora(unittest.TestCase):
         self.assertFalse([k for k in keys if 'G16X' in k or k.startswith('AGX_APPLE9_')])
 
     def test_the_greeter_uses_the_same_mesa_as_its_compositor(self):
-        cp = sddm_merge([AURORA/'sddm-gpu-aurora.conf'])
+        cp = sddm_merge([AURORA/'sddm-gpu.conf'])
         greeter = dict(e.split('=', 1) for e in cp['General']['GreeterEnvironment'].split(','))
         ours = kv(AURORA/'greeter-env')
-        for k in ('LD_LIBRARY_PATH', 'GBM_BACKENDS_PATH', '__EGL_VENDOR_LIBRARY_FILENAMES', 'QT_QPA_PLATFORM', 'QSG_RHI_BACKEND'):
-            self.assertEqual(greeter[k], ours[k], k)
-        # GreeterEnvironment is a comma-separated list: the ASAHI_MESA_DEBUG separators are colons there
-        self.assertEqual(greeter['ASAHI_MESA_DEBUG'].replace(':', ','), ours['ASAHI_MESA_DEBUG'])
+        self.assertEqual(greeter, ours)
+        self.assertFalse([k for k in DRIVER_KEYS if k in greeter])
         self.assertEqual(cp['Theme']['ThemeDir'], '/usr/share/m4/sddm-themes')
         self.assertEqual(cp['Theme']['Current'], 'omarchy-lock')
         theme = SUPPORT/'usr/share/m4/sddm-themes/omarchy-lock'
@@ -237,7 +243,7 @@ class B_GreeterOnAurora(unittest.TestCase):
     def test_without_the_gpu_the_greeter_is_software_and_stale_keys_are_gone(self):
         got, args = run_wrapper(self, False, self.POISON)
         self.assertEqual(got['LIBGL_ALWAYS_SOFTWARE'], '1')
-        self.assertEqual(got['GALLIUM_DRIVER'], 'llvmpipe')
+        self.assertEqual(got['GALLIUM_DRIVER'], 'softpipe')     # the system Mesa builds softpipe, not llvmpipe
         self.assertEqual(got['AQ_NO_MODIFIERS'], '1')
         for k in ('LD_LIBRARY_PATH', 'QT_QPA_PLATFORM', 'MESA_LOADER_DRIVER_OVERRIDE', 'DRI_PRIME', 'LD_PRELOAD', 'MESA_SHADER_CACHE_DIR',
                   'LIBGL_DRIVERS_PATH', 'GBM_BACKENDS_PATH', 'MESA_GLTHREAD', '__EGL_VENDOR_LIBRARY_FILENAMES'):
@@ -352,7 +358,7 @@ class G_KmsCard(unittest.TestCase):
         self.assertEqual(got['AQ_NO_MODIFIERS'], '1')
 
     def test_no_shipped_file_hardcodes_a_card_number(self):
-        for path in (M4/'sddm-compositor', M4/'session-env.sh', AURORA/'session-env', AURORA/'greeter-env', AURORA/'sddm-gpu-aurora.conf'):
+        for path in (M4/'sddm-compositor', M4/'session-env.sh', AURORA/'session-env', AURORA/'greeter-env', AURORA/'sddm-gpu.conf'):
             self.assertNotRegex(path.read_text(), r'/dev/dri/card\d', str(path))
         self.assertNotIn('AQ_DRM_DEVICES', kv(AURORA/'session-env'))
         self.assertNotIn('AQ_DRM_DEVICES', kv(AURORA/'greeter-env'))
@@ -405,19 +411,16 @@ class GpuLoadSddmLink(unittest.TestCase):
     def run_load(self, modprobe_ok, stale, gpu_device=False, mesa=True):
         d = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, d)
-        for sub in ('run', 'etc/sddm.conf.d', 'sys/class/drm', 'sys/module', 'sys/drivers/asahi', 'sys/bus/platform/devices', 'lib',
-                    'opt/aurora-mesa'):
+        for sub in ('run', 'etc/sddm.conf.d', 'sys/class/drm', 'sys/module', 'sys/drivers/asahi', 'sys/bus/platform/devices', 'lib'):
             (d/sub).mkdir(parents=True)
         if mesa:
-            for n in ('session-env', 'greeter-env', 'sddm-gpu-aurora.conf'):
-                shutil.copy(AURORA/n, (d/'opt/aurora-mesa'/n))
-                if n != 'sddm-gpu-aurora.conf':
-                    os.symlink(d/'opt/aurora-mesa'/n, d/'lib'/n)
+            for n in ('session-env', 'greeter-env', 'sddm-gpu.conf'):
+                shutil.copy(AURORA/n, d/'lib'/n)
         if gpu_device:      # 7.1.12-m4.10: the kernel made the GPU node a device
             (d/'sys/bus/platform/devices/206400000.gpu/of_node').mkdir(parents=True)
             (d/'sys/bus/platform/devices/206400000.gpu/of_node/compatible').write_bytes(b'apple,agx-t6040\0apple,agx-g17p\0')
         if stale:
-            os.symlink('/opt/aurora-mesa/sddm-gpu-aurora.conf', d/'etc/sddm.conf.d/zz-m4-gpu.conf')
+            os.symlink('/usr/lib/m4/sddm-gpu.conf', d/'etc/sddm.conf.d/zz-m4-gpu.conf')
         bindir = d/'bin'
         bindir.mkdir()
         node = ('[ "$1" = -r ] && exit 0\nmkdir -p {d}/sys/module/asahi {d}/sys/devices/gpu {d}/sys/class/drm/renderD128\n'
@@ -427,8 +430,8 @@ class GpuLoadSddmLink(unittest.TestCase):
             node if modprobe_ok else 'exit 0\n' if modprobe_ok is None else '[ "$1" = -r ] || exit 1\n'))
         (bindir/'modprobe').chmod(0o755)
         text = (M4/'gpu-load').read_text()
-        self.assertIn('\nO=/opt/aurora-mesa\n', text)
-        text = text.replace('\nO=/opt/aurora-mesa\n', '\nO=%s\n' % (d/'opt/aurora-mesa')).replace('/run/m4', str(d/'run')) \
+        self.assertIn('\nO=/usr/lib/m4\n', text)
+        text = text.replace('\nO=/usr/lib/m4\n', '\nO=%s\n' % (d/'lib')).replace('/run/m4', str(d/'run')) \
             .replace('/etc/sddm.conf.d', str(d/'etc/sddm.conf.d')).replace('/usr/bin/modprobe', str(bindir/'modprobe')) \
             .replace('/sys/class/drm', str(d/'sys/class/drm')).replace('/sys/module/asahi', str(d/'sys/module/asahi')) \
             .replace('/sys/bus/platform/devices', str(d/'sys/bus/platform/devices')) \
@@ -447,7 +450,7 @@ class GpuLoadSddmLink(unittest.TestCase):
         d = self.run_load(True, stale=False)
         link = d/'etc/sddm.conf.d/zz-m4-gpu.conf'
         self.assertTrue(link.is_symlink())
-        self.assertEqual(os.readlink(link), str(d/'opt/aurora-mesa/sddm-gpu-aurora.conf'))
+        self.assertEqual(os.readlink(link), str(d/'lib/sddm-gpu.conf'))
         self.assertEqual((d/'run/gpu-ready').read_text(), 'ok aurora\n')      # m4-boot's boot-ok keys on "aurora"
         self.assertFalse((d/'run/gpu-failed').exists())
         self.assertEqual(self.modprobe_calls(d), ['-r asahi', '-bv --ignore-install asahi t6040_attach=1'])
@@ -468,10 +471,10 @@ class GpuLoadSddmLink(unittest.TestCase):
         self.assertTrue((d/'run/gpu-failed').exists())
         self.assertFalse((d/'run/gpu-ready').exists())
 
-    def test_without_aurora_mesa_the_driver_is_not_loaded(self):
+    def test_without_the_environment_files_the_driver_is_not_loaded(self):
         d = self.run_load(True, stale=False, mesa=False)
         self.assertEqual(self.modprobe_calls(d), [])
-        self.assertIn('m4-aurora-mesa', (d/'run/gpu-failed').read_text())
+        self.assertIn('m4-support', (d/'run/gpu-failed').read_text())
         self.assertFalse((d/'run/gpu-ready').exists())
 
     def test_the_g16_driver_stays_blacklisted(self):

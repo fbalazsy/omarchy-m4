@@ -1,5 +1,6 @@
-# The renderer environment keys the greeter's compositor and the GPU session clear before they apply their own values (the greeter-env and
-# session-env of m4-aurora-mesa), plus the preload/audit/backend selectors and other Mesa selectors an inherited environment may carry.
+# The renderer environment keys the greeter's compositor and the GPU session clear before they apply their own values (greeter-env and
+# session-env), plus the preload/audit/backend selectors and other Mesa selectors an inherited environment may carry (including the
+# library paths and driver selectors the private /opt/aurora-mesa setup used to export).
 # One name per line.
 LD_LIBRARY_PATH
 GBM_BACKENDS_PATH

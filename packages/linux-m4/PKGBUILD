@@ -1,8 +1,10 @@
 # Maintainer: M4 project (N1) <m4@localhost>
 #
 # NATIVE BUILD VARIANT (owner's disk); toolchain differences are reported, not refused.
-# linux-m4: Linux 7.1.12 for the Apple M4 Pro (T6040, J616s) on aurora-silicon's aurora-wip, with our M4 Pro support on top
-# (branch m4/aurora of ~/src/linux-m4-aurora-base; Gravity-based releases up to 7.1.13-45). Every module is in-tree. No initramfs is generated here: the m4-boot libalpm hook
+# linux-m4: Linux 7.3.0 for the Apple M4 Pro (T6040, J616s) on aurora-silicon's integration/aurora, with our M4 Pro support on top
+# (branch m4/aurora-7.3, kept in the aurora clone ~/src/ext/aurora-silicon/linux; that clone is partial (blob:none), so the
+# package builds from ~/src/linux-m4-7.3, a complete bare clone of the branch back to its 7.3 base; the 7.1.12 line up to 7.1.12-29 came from
+# m4/aurora of ~/src/linux-m4-aurora-base; Gravity-based releases up to 7.1.13-45). Every module is in-tree. No initramfs is generated here: the m4-boot libalpm hook
 # (m4-support) writes /boot/m4 from /usr/lib/modules/$kver/{vmlinuz,dtb}.
 #
 # Build from scratch every time: the clone is reset and cleaned by makepkg, prepare() runs `make mrproper` and
@@ -10,10 +12,10 @@
 
 pkgbase=linux-m4
 pkgname=("$pkgbase" "$pkgbase-headers")
-pkgver=7.1.12
-pkgrel=24
+pkgver=7.3.0
+pkgrel=18
 pkgdesc='Linux kernel for the Apple M4 (T6040 / J616s)'
-url='https://github.com/jgoyvaerts/linux/tree/m4/aurora'
+url='https://github.com/jgoyvaerts/linux/tree/m4/aurora-7.3'
 arch=(aarch64)
 license=(GPL-2.0-only)
 makedepends=(
@@ -27,7 +29,7 @@ options=(!debug !strip)
 # from aurora's tools/aurora-bindgen recipe passes the kernel's layout tests.
 _bindgen=${M4_BINDGEN:-$HOME/src/aurora-bindgen/rust-bindgen-0.73.2/target/release/bindgen}
 _repo=${M4_KERNEL_REPO:-https://github.com/jgoyvaerts/linux.git}
-_ref=${M4_KERNEL_REF:-commit=10fdf2f5b5e75e8aa01e6178a2707b9e6744aff6}   # jgoyvaerts/linux m4/aurora
+_ref=${M4_KERNEL_REF:-commit=d992c7dad7d830ab3a841396fc2c5c155f20b7f3}   # jgoyvaerts/linux m4/aurora-7.3
 case $_repo in /*) _url="git+file://$_repo" ;; *) _url="git+$_repo" ;; esac
 source=("$pkgbase::$_url#$_ref" check-modules.py expected-modules.txt)
 sha256sums=(SKIP SKIP SKIP)
@@ -109,7 +111,7 @@ check() {
   echo "Module ELF validity and expected module set..."
   python3 "$srcdir/check-modules.py" . --release "$rel" \
     --expect-file "$srcdir/expected-modules.txt" \
-    --base 070c8e4d43 --json "$srcdir/module-check.json" --loadtest "$srcdir/MODULES-LOADTEST.json"
+    --base ed55042c712 --json "$srcdir/module-check.json" --loadtest "$srcdir/MODULES-LOADTEST.json"
 }
 
 _package() {

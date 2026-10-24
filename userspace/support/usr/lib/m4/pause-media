@@ -1,0 +1,23 @@
+#!/bin/sh
+# pause-media: pause every MPRIS media player before system sleep, as macOS does (2026-10-21).
+# Music still playing when the system freezes is cut mid-signal by the speaker volume lock (a pop into sleep), and it
+# jumps back in mid-waveform after the resume (a pop out of sleep). A paused player stops the way a normal pause does,
+# the speaker DSP graph keeps running on silence, and nothing plays at wake. Run by m4-pause-media.service before
+# sleep.target, once for every user session bus.
+RUN=${M4_PAUSE_MEDIA_RUN:-/run/user}           # tests point this at a fake tree
+paused=0
+for bus in "$RUN"/*/bus; do
+  [ -S "$bus" ] || continue
+  uid=$(basename "$(dirname "$bus")")
+  gid=$(id -g "$uid" 2>/dev/null) || continue
+  # setpriv, not runuser: the bus only takes its own user, and runuser's PAM stack opened a login session per call
+  as_user() { setpriv --reuid="$uid" --regid="$gid" --init-groups env DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" timeout 2 "$@"; }
+  for name in $(as_user busctl --user list --no-legend | awk '$1 ~ /^org\.mpris\.MediaPlayer2\./ {print $1}'); do
+    as_user busctl --user call "$name" /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Pause && paused=$((paused + 1))
+  done
+done
+# The J616 speaker graph delays the sound by its FIR length (8160 samples, 170 ms): let what played before the pause
+# come out before the kernel locks the speaker volumes.
+[ "$paused" -gt 0 ] && sleep 0.25
+logger -t pause-media "paused $paused media player(s) before sleep"
+exit 0

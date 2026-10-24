@@ -15,7 +15,7 @@ A small m1n1-derived loader, installed once from macOS Recovery, boots `/boot/m4
 | `m4-support` | `m4-boot` (writes `/boot/m4`), mkinitcpio hooks, systemd units, modprobe.d, the greeter and session setup | `userspace/support` |
 | `m4-tools` | `m4-test`: attended hardware tests | `userspace/tools` |
 | `m4-firmware` | Wi-Fi/Bluetooth firmware and the light-sensor calibration (files not in git) | `userspace/firmware` |
-| `m4-aurora-mesa` | aurora's Mesa (GL, GLES, Vulkan) for the GPU driver, in `/opt/aurora-mesa` | [jgoyvaerts/mesa `m4-t6040-v2`](https://github.com/jgoyvaerts/mesa/tree/m4-t6040-v2) |
+| `m4-aurora-mesa`, `m4-aurora-vulkan` | aurora's Mesa (Asahi GL/GLES, Zink, Honeykrisp Vulkan) as the system Mesa (replaces `mesa`); the T6040 workarounds are driver defaults | [jgoyvaerts/mesa `m4-t6040-uapi73`](https://github.com/jgoyvaerts/mesa/tree/m4-t6040-uapi73), `packages/m4-aurora-mesa` |
 | `quickshell`, `m4-omarchy-qt612-compat` | Omarchy shell build and a Qt 6.12 fix | `packages/` |
 
 ## Sources

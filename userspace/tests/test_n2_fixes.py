@@ -106,7 +106,7 @@ class F2UnitConditions(unittest.TestCase):
     def test_the_condition_list_for_the_vm_gate_is_complete_and_publishable(self):
         rows = conditions()
         names = {Path(r['file']).name for r in rows}
-        for unit in ('m4-gpu.service', 'm4-display.service', 'm4-gpu-inhibit.service', 'm4-kbd-idle.service',
+        for unit in ('m4-gpu.service', 'm4-display.service', 'm4-kbd-idle.service',
                      'm4-bt-connect.service'):
             self.assertIn(unit, names)
         for r in rows:

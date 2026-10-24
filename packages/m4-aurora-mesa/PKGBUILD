@@ -1,42 +1,81 @@
-# m4-aurora-mesa: aurora's Mesa (GL, GLES, Honeykrisp Vulkan) for the M4 Pro (T6040) GPU desktop, in the private prefix
-# /opt/aurora-mesa (m4-support links /usr/lib/m4/{session,greeter}-env to the files here).
+# m4-aurora-mesa: aurora's Mesa with our M4 Pro (T6040) support, installed as the system Mesa the way aurora's own
+# mesa-aurora/vulkan-aurora (alarm-aurora) are: in /usr, replacing Arch's mesa, the Vulkan ICD in the standard place, no
+# environment variables. The T6040's firmware workarounds (one queue, no compression) are driver defaults in this source.
 #
-# Source: aurora-silicon/mesa agx3b with our T6040 commits, branch m4-t6040-v2 of jgoyvaerts/mesa (M4_MESA_URL overrides it,
+# Source: aurora-silicon/mesa aurora-wip (Borealis) with our T6040 commits, branch m4-borealis of jgoyvaerts/mesa (M4_MESA_URL overrides it,
 # e.g. file:///path/to/a/mesa/clone). The build-time compilers (mesa_clc, vtn_bindgen2, asahi_clc) are built from the same
-# tree first, so nothing outside this PKGBUILD is needed.
-pkgname=m4-aurora-mesa
-_commit=${M4_MESA_COMMIT:-551e010645ec7f8853a4e8e78358a62a4d686eaa}   # hk: read occlusion results only after their submission completes (G-24)
+# tree first, so the packaged drivers link neither LLVM nor SPIRV-Tools.
+pkgbase=m4-aurora-mesa
+pkgname=(m4-aurora-mesa m4-aurora-vulkan)
+epoch=1
+_commit=${M4_MESA_COMMIT:-d2f6f35d57b11c49a555dacac79455d551aa13a2}   # m4-borealis: aurora-wip 4911479b + 1queue+nocompress T6040 defaults (ASAHI_T6040_DEFAULTS=0 drops them) + uniform atomics on AGX3 (aurora mesa#70)
 pkgver=26.3.0devel.r${_commit:0:8}
 pkgrel=1
-pkgdesc="aurora's Mesa (GL, GLES, Honeykrisp Vulkan) for the M4 Pro GPU desktop, private prefix /opt/aurora-mesa"
+pkgdesc="aurora's Mesa (Asahi Gallium, Zink, Borealis Vulkan) with M4 Pro (T6040) support"
 arch=(aarch64)
 url='https://github.com/aurora-silicon/mesa'
 license=(MIT)
-depends=(libdrm wayland expat zlib zstd libglvnd)
-makedepends=(git meson ninja python-mako python-yaml python-packaging glslang wayland-protocols llvm clang libclc spirv-llvm-translator spirv-tools)
+makedepends=(git meson ninja python-mako python-yaml python-packaging rust rust-bindgen clang llvm libclc
+             spirv-llvm-translator spirv-tools cbindgen glslang libdrm expat libglvnd
+             libx11 libxcb libxext libxfixes libxrandr libxshmfence libxxf86vm
+             wayland wayland-protocols vulkan-headers vulkan-icd-loader libdisplay-info lm_sensors zlib zstd xcb-util-keysyms)
 options=(!lto !debug)
-source=("mesa::git+${M4_MESA_URL:-https://github.com/jgoyvaerts/mesa}#commit=$_commit" session-env greeter-env sddm-gpu-aurora.conf)
-sha256sums=(SKIP SKIP SKIP SKIP)
+source=("mesa::git+${M4_MESA_URL:-https://github.com/jgoyvaerts/mesa}#commit=$_commit")
+sha256sums=(SKIP)
 
-build() {
-  # the build-time compilers of this same tree, in a host prefix under $srcdir
-  meson setup "$srcdir/clc-build" "$srcdir/mesa" -D prefix="$srcdir/clc" -D buildtype=release -D platforms=wayland \
-    -D gallium-drivers=asahi -D vulkan-drivers= -D glx=disabled -D egl=enabled -D gbm=enabled -D gles1=disabled \
-    -D gles2=disabled -D opengl=false -D llvm=enabled -D shared-llvm=enabled -D video-codecs= -D build-tests=false -D tools= \
-    -D mesa-clc=enabled -D install-mesa-clc=true -D precomp-compiler=enabled -D install-precomp-compiler=true
-  meson compile -C "$srcdir/clc-build"
-  meson install -C "$srcdir/clc-build" --quiet
-  export PATH="$srcdir/clc/bin:$PATH"
-  meson setup "$srcdir/build" "$srcdir/mesa" -D prefix=/opt/aurora-mesa -D libdir=lib -D buildtype=release -D b_lto=false \
-    -D platforms=wayland -D gallium-drivers=asahi -D vulkan-drivers=asahi -D glx=disabled -D egl=enabled -D gbm=enabled \
-    -D gles1=disabled -D gles2=enabled -D opengl=true -D glvnd=enabled -D glvnd-vendor-name=mesa -D llvm=disabled \
-    -D valgrind=disabled -D libunwind=disabled -D lmsensors=disabled -D video-codecs= -D gallium-va=disabled \
-    -D build-tests=false -D tools= -D mesa-clc=system -D precomp-compiler=system
-  meson compile -C "$srcdir/build"
+# aurora's mesa-aurora driver set
+_options=(-Dplatforms=x11,wayland
+  -Dgallium-drivers=asahi,zink,softpipe -Dvulkan-drivers=asahi
+  -Degl=enabled -Dgbm=enabled -Dglx=dri -Dgles1=enabled -Dgles2=enabled
+  -Dglvnd=enabled -Dvideo-codecs=all -Dvulkan-layers=
+  -Dexpat=enabled -Dzstd=enabled -Dlmsensors=enabled -Dlibunwind=disabled -Dvalgrind=disabled)
+_meson() {
+  meson setup --prefix /usr --libexecdir lib --sbindir bin --buildtype plain \
+    --wrap-mode nodownload -Db_pie=true -Db_ndebug=true -Dpython.bytecompile=1 "$@"
 }
 
-package() {
-  meson install -C "$srcdir/build" --destdir "$pkgdir" --quiet
-  rm -rf "$pkgdir/opt/aurora-mesa/include" "$pkgdir/opt/aurora-mesa/lib/pkgconfig"
-  install -m644 "$srcdir/session-env" "$srcdir/greeter-env" "$srcdir/sddm-gpu-aurora.conf" "$pkgdir/opt/aurora-mesa/"
+build() {
+  _meson mesa tools "${_options[@]}" -Dllvm=enabled -Dbuild-tests=false
+  ninja -C tools src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2 src/asahi/clc/asahi_clc
+  printf '%s\n' '[binaries]' \
+    "mesa_clc = '$srcdir/tools/src/compiler/clc/mesa_clc'" \
+    "vtn_bindgen2 = '$srcdir/tools/src/compiler/spirv/vtn_bindgen2'" \
+    "asahi_clc = '$srcdir/tools/src/asahi/clc/asahi_clc'" > tools.ini
+  _meson mesa build "${_options[@]}" --native-file tools.ini \
+    -Dllvm=disabled -Dspirv-tools=disabled -Dmesa-clc=system -Dprecomp-compiler=system -Dbuild-tests=false
+  meson compile -C build
+  DESTDIR="$srcdir/mesa-stage" meson install -C build --no-rebuild
+}
+
+check() {
+  # Nothing packaged may follow the system's LLVM or SPIRV-Tools.
+  local binary
+  while IFS= read -r -d '' binary; do
+    if LC_ALL=C readelf -d "$binary" | grep -Eq 'NEEDED.*(libLLVM|libSPIRV-Tools)'; then
+      echo "unexpected compiler runtime dependency: $binary" >&2
+      return 1
+    fi
+  done < <(find "$srcdir/mesa-stage" -name '*.so*' -type f -print0)
+}
+
+package_m4-aurora-mesa() {
+  pkgdesc="aurora's Asahi Gallium and Zink OpenGL drivers with M4 Pro (T6040) support"
+  depends=(expat glibc gcc-libs libdrm libglvnd libx11 libxcb libxext libxshmfence libxxf86vm lm_sensors wayland zlib zstd
+           vulkan-mesa-implicit-layers)
+  provides=("mesa=$epoch:$pkgver" mesa-libgl opengl-driver libgbm.so)
+  conflicts=(mesa)
+  cp -a "$srcdir/mesa-stage/usr" "$pkgdir/"
+  rm "$pkgdir/usr/lib/libvulkan_asahi.so" "$pkgdir"/usr/share/vulkan/icd.d/*asahi*.json
+  rmdir "$pkgdir/usr/share/vulkan/icd.d" "$pkgdir/usr/share/vulkan" 2>/dev/null || true
+}
+
+package_m4-aurora-vulkan() {
+  pkgdesc="aurora's Honeykrisp Vulkan driver with M4 Pro (T6040) support"
+  depends=(expat glibc gcc-libs libdrm libdisplay-info libx11 libxcb libxshmfence systemd-libs vulkan-icd-loader wayland
+           xcb-util-keysyms zlib zstd)
+  provides=("vulkan-asahi=$epoch:$pkgver" vulkan-driver)
+  conflicts=(vulkan-asahi)
+  install -Dm755 "$srcdir/mesa-stage/usr/lib/libvulkan_asahi.so" "$pkgdir/usr/lib/libvulkan_asahi.so"
+  install -d "$pkgdir/usr/share/vulkan/icd.d"
+  cp -a "$srcdir"/mesa-stage/usr/share/vulkan/icd.d/*asahi*.json "$pkgdir/usr/share/vulkan/icd.d/"
 }

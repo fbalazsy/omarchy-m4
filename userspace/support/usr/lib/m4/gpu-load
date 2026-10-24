@@ -1,8 +1,8 @@
 #!/bin/sh
-# m4-gpu.service: make sure aurora's GPU driver (asahi) is up and give the greeter aurora's Mesa (m4-aurora-mesa, /opt/aurora-mesa).
+# m4-gpu.service: make sure aurora's GPU driver (asahi) is up and give the greeter the GPU renderer settings (the driver is the system Mesa).
 # Every outcome is recorded in /run/m4; the exit status is always 0 so nothing downstream fails and the greeter simply starts in software
-# when the driver did not come up. The session and greeter environments are m4-aurora-mesa's files: /usr/lib/m4/{session,greeter}-env link to them.
-O=/opt/aurora-mesa
+# when the driver did not come up. The session and greeter environments are /usr/lib/m4/{session,greeter}-env and sddm-gpu.conf.
+O=/usr/lib/m4
 mkdir -p /run/m4
 rm -f /run/m4/gpu-ready /run/m4/gpu-failed
 # the GPU-only greeter configuration (aurora's Mesa for the Qt greeter, the tested theme) exists only while the driver is up
@@ -13,8 +13,8 @@ fail() {
     echo "M4_GPU_FAILED $1"
     exit 0
 }
-for f in /usr/lib/m4/session-env /usr/lib/m4/greeter-env "$O/sddm-gpu-aurora.conf"; do
-    [ -r "$f" ] || fail "$f is missing (is m4-aurora-mesa installed?)"
+for f in "$O/session-env" "$O/greeter-env" "$O/sddm-gpu.conf"; do
+    [ -r "$f" ] || fail "$f is missing (is m4-support installed whole?)"
 done
 # -b: `blacklist asahi` under /etc/modprobe.d is the kill switch, also for this explicit load
 if grep -qs 'apple,agx-t6040' /sys/bus/platform/devices/*/of_node/compatible; then
@@ -40,7 +40,7 @@ while [ "$i" -lt 60 ]; do
 done
 [ -n "$node" ] || fail "asahi loaded but no render node appeared within 30 s"
 mkdir -p /etc/sddm.conf.d
-ln -sf "$O/sddm-gpu-aurora.conf" "$SDDM_GPU"
+ln -sf "$O/sddm-gpu.conf" "$SDDM_GPU"
 # m4-boot's boot-ok check keys on the word "aurora"
 printf 'ok aurora\n' > /run/m4/gpu-ready
 echo "M4_GPU_READY (aurora, $(basename "$node"))"

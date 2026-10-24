@@ -13,6 +13,7 @@ apple_admac
 apple_avd
 apple_isp
 apple_mcc
+apple_pmp
 apple_soc_cpufreq
 apple_wdt
 appledrm
@@ -101,7 +102,6 @@ nf_nat_tftp
 nf_reject_ipv4
 nf_reject_ipv6
 nf_tables
-nfnetlink
 nfnetlink_log
 nft_chain_nat
 nft_compat
@@ -129,7 +129,6 @@ nvme_core
 overlay
 phy_apple_t6040_usb2
 pkcs8_key_parser
-pmp
 psnap
 pwm_apple
 r8153_ecm

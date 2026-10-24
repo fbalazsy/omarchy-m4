@@ -13,6 +13,9 @@ SCRIPT = TREES/'support/usr/lib/m4/cpufreq-start'
 UNIT = TREES/'support/usr/lib/systemd/system/m4-cpufreq.service'
 E_KHZ = [1020000, 1404000, 1788000, 2112000, 2352000, 2532000, 2592000]
 P_KHZ = [1260000, 1512000, 1800000, 2088000, 2352000, 2616000, 2868000, 3096000, 4512000]
+# Logical CPU numbers follow the device tree's CPU node order: the old daily tree, and the upstream (#396) layout.
+OLD = (('policy0', '0 10 11 12 13', P_KHZ), ('policy1', '1 2 3 4', E_KHZ), ('policy5', '5 6 7 8 9', P_KHZ))
+NEW = (('policy0', '0 5 6 7 8', P_KHZ), ('policy1', '1 2 3 4', E_KHZ), ('policy9', '9 10 11 12 13', P_KHZ))
 
 
 def load():
@@ -24,15 +27,17 @@ def load():
 
 
 class Tree:
-    def __init__(self, root, conf='P_MAX_KHZ=2616000\nE_MAX_KHZ=2112000\n', temp='52000', bound=('cpufreq-cpu0', 'cpufreq-cpu1',
-                 'cpufreq-cpu5'), policies=True, zone=True):
+    def __init__(self, root, conf='P_MAX_KHZ=2616000\nE_MAX_KHZ=2112000\n', temp='52000', bound=None, policies=True, zone=True,
+                 layout=OLD):
         self.root = Path(root)
+        cdevs = ['cpufreq-cpu%s' % cpus.split()[0] for _, cpus, _ in layout]
+        bound = cdevs if bound is None else bound
         if conf is not None:
             (self.root/'etc/m4').mkdir(parents=True)
             (self.root/'etc/m4/cpufreq.conf').write_text(conf)
         th = self.root/'sys/class/thermal'
         th.mkdir(parents=True)
-        for i, name in enumerate(('cpufreq-cpu0', 'cpufreq-cpu1', 'cpufreq-cpu5', 'battery')):
+        for i, name in enumerate(cdevs + ['battery']):
             (th/('cooling_device%d' % i)).mkdir()
             (th/('cooling_device%d' % i)/'type').write_text(name + '\n')
         if zone:
@@ -42,13 +47,13 @@ class Tree:
                          ('trip_point_0_temp', '113000')):
                 (z/k).write_text(v + '\n')
             (z/'cdev0_trip_point').write_text('0\n')
-            for i, name in enumerate(('cpufreq-cpu0', 'cpufreq-cpu1', 'cpufreq-cpu5')):
+            for i, name in enumerate(cdevs):
                 if name in bound:
                     os.symlink('../cooling_device%d' % i, z/('cdev%d' % i))
         self.cpufreq = self.root/'sys/devices/system/cpu/cpufreq'
         self.cpufreq.mkdir(parents=True)
         if policies:
-            for p, cpus, table in (('policy0', '0 10 11 12 13', P_KHZ), ('policy1', '1 2 3 4', E_KHZ), ('policy5', '5 6 7 8 9', P_KHZ)):
+            for p, cpus, table in layout:
                 d = self.cpufreq/p
                 d.mkdir()
                 (d/'related_cpus').write_text(cpus + '\n')
@@ -58,7 +63,7 @@ class Tree:
 
     def state(self):
         return {p: ((self.cpufreq/p/'scaling_max_freq').read_text().strip(), (self.cpufreq/p/'scaling_governor').read_text().strip())
-                for p in ('policy0', 'policy1', 'policy5') if (self.cpufreq/p).is_dir()}
+                for p in sorted(d.name for d in self.cpufreq.iterdir())}
 
 
 class Start(unittest.TestCase):
@@ -155,7 +160,25 @@ class Start(unittest.TestCase):
         self.assertRefusedUntouched(Tree(self.dir.name, temp='0'), 'not a die temperature')
 
     def test_zone_must_be_bound_to_all_three_policies(self):
-        self.assertRefusedUntouched(Tree(self.dir.name, bound=('cpufreq-cpu0', 'cpufreq-cpu1')), 'zone binding')
+        self.assertRefusedUntouched(Tree(self.dir.name, bound=['cpufreq-cpu0', 'cpufreq-cpu1']), 'zone binding')
+
+    def test_upstream_cpu_order(self):
+        t = Tree(self.dir.name, conf=None, layout=NEW)
+        self.assertEqual(self.run_start(), 0)
+        self.assertEqual(t.state(), {'policy0': ('%d' % max(P_KHZ), 'schedutil'), 'policy1': ('%d' % max(E_KHZ), 'schedutil'),
+                                     'policy9': ('%d' % max(P_KHZ), 'schedutil')})
+
+    def test_upstream_cpu_order_needs_its_own_cooling_devices(self):
+        self.assertRefusedUntouched(Tree(self.dir.name, layout=NEW, bound=('cpufreq-cpu0', 'cpufreq-cpu1', 'cpufreq-cpu5')),
+                                    'zone binding')
+
+    def test_cluster_sizes_are_checked(self):
+        odd = (('policy0', '0 5 6 7', P_KHZ), ('policy1', '1 2 3 4 8', E_KHZ), ('policy9', '9 10 11 12 13', P_KHZ))
+        self.assertRefusedUntouched(Tree(self.dir.name, layout=odd), 'not one')
+
+    def test_e_cluster_must_be_slower(self):
+        same = (('policy0', '0 5 6 7 8', P_KHZ), ('policy1', '1 2 3 4', P_KHZ), ('policy9', '9 10 11 12 13', P_KHZ))
+        self.assertRefusedUntouched(Tree(self.dir.name, layout=same), 'cannot tell the E cluster')
 
     def test_policies_must_appear(self):
         self.assertRefusedUntouched(Tree(self.dir.name, policies=False), 'three cpufreq policies')

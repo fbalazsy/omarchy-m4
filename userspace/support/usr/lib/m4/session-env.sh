@@ -1,5 +1,5 @@
 # POSIX sh, sourced by uwsm for the Hyprland session: with /run/m4/gpu-ready, clear every renderer key the environment may have inherited (as the
-# qualified session path did) and export aurora's Mesa (/usr/lib/m4/session-env, a link to m4-aurora-mesa's file). AQ_DRM_DEVICES is the display
+# qualified session path did) and export the GPU session's toolkit settings (/usr/lib/m4/session-env). AQ_DRM_DEVICES is the display
 # driver's card, chosen at run time (/usr/lib/m4/kms-card.sh); MOZ_DISABLE_RDD_SANDBOX for Firefox's VA-API on the AVD. Without the GPU
 # nothing is changed.
 if [ -e /run/m4/gpu-ready ] && [ -r /usr/lib/m4/session-env ]; then

@@ -1,0 +1,14 @@
+[Unit]
+Description=M4: pause media players before sleep (no speaker pop into or out of sleep)
+ConditionFirmware=device-tree-compatible(apple,j616s)
+StartLimitIntervalSec=60
+StartLimitBurst=10
+Before=sleep.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/m4/pause-media
+TimeoutStartSec=10
+
+[Install]
+WantedBy=sleep.target

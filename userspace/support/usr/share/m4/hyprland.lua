@@ -31,7 +31,9 @@ hl.config({
   },
   misc = { vrr = 0, session_lock_blur = false },
   cursor = { no_hardware_cursors = 1 },
-  xwayland = { enabled = false },
+  -- X11 clients (Wine games such as Hearthstone) run through Xwayland; native toolkits stay on Wayland below.
+  -- At the panel's scale 2, zero scaling lets them render at native resolution (Wine DPI 192) instead of 1x upscaled.
+  xwayland = { enabled = true, force_zero_scaling = true },
 })
 -- default.hypr.envs changes QT_QPA_PLATFORM to wayland;xcb. Restore the tested client selection after that import.
 hl.env("QT_QPA_PLATFORM", "wayland")

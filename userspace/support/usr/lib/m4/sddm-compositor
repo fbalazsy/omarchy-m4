@@ -1,7 +1,7 @@
 #!/bin/sh
 # The greeter's compositor (sddm's CompositorCommand, run as the sddm user). It never refuses: with the GPU driver loaded the greeter renders on
-# aurora's Mesa, otherwise in software. The qualified greeter path: clear every renderer key the environment inherited, then apply the fixed
-# values; the values are /usr/lib/m4/greeter-env (a link to m4-aurora-mesa's file), the keys /usr/lib/m4/env-keys.
+# the system Mesa (asahi), otherwise in software (softpipe). The qualified greeter path: clear every renderer key the environment inherited, then apply the fixed
+# values; the values are /usr/lib/m4/greeter-env, the keys /usr/lib/m4/env-keys.
 M4=/usr/lib/m4
 if [ -r "$M4/env-keys" ]; then
     while IFS= read -r _k; do
@@ -14,7 +14,7 @@ if [ -e /run/m4/gpu-ready ] && [ -r "$M4/greeter-env" ]; then
         export "$_k=$_v"
     done < "$M4/greeter-env"
 else
-    export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe AQ_NO_MODIFIERS=1
+    export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=softpipe AQ_NO_MODIFIERS=1
 fi
 unset _k _v
 # the KMS card is chosen now, not written down: the display driver's card number depends on what loaded before it

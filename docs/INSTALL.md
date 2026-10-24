@@ -50,7 +50,7 @@ power on → iBoot → (boot policy of the M4-Dev macOS) → our loader → /boo
    diskutil apfs resizeContainer disk0s2 <new size of macOS> %0FC63DAF-8483-4772-8E79-3D69D8477DE4% Linux 64G
    ```
    Write down its first and last block (`diskutil info`, or `gpt -r show /dev/disk0` in Recovery) and its partition UUID: they go into your loader.
-3. **Collect firmware (designed).** Apple's firmware can't be redistributed, so each owner extracts their own. The `all_firmware.tar.gz` and kernelcache that the Asahi installer saves from macOS are the input of `asahi-fwextract`, which produces exactly the file names our `m4-firmware` package needs. Keep that folder on the USB stick.
+3. **Collect firmware (designed).** Apple's firmware can't be redistributed, so each owner extracts their own. The `all_firmware.tar.gz` and kernelcache that the Asahi installer saves from macOS are the input of `asahi-fwextract`, which produces exactly the file names our `m4-firmware` package needs. The installer does not save the M4 camera daemon: also copy it into that folder (`cp /usr/sbin/appleh16camerad <folder>/`), it holds the front camera's setfile. Keep that folder on the USB stick.
 
 ### 4.2 The root file system (unknown on macOS, done from Linux)
 

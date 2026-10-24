@@ -1,0 +1,14 @@
+# Give Hyprland CAP_SYS_NICE after every install or upgrade (the file capability goes with the replaced binary). The asahi
+# kernel driver creates a high-priority GPU queue only for CAP_SYS_NICE (or the render node's DRM master, which Hyprland is
+# not), so without it the compositor's "high priority" EGL context runs at the clients' priority. Side effect: the kernel
+# runs Hyprland in secure-exec mode, so LD_PRELOAD/LD_LIBRARY_PATH are ignored for it.
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/bin/Hyprland
+
+[Action]
+Description = Giving Hyprland CAP_SYS_NICE (high-priority GPU queue)...
+When = PostTransaction
+Exec = /usr/bin/setcap cap_sys_nice+ep /usr/bin/Hyprland

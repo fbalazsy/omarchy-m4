@@ -1,1 +1,13 @@
-/opt/aurora-mesa/greeter-env
+# Greeter environment of the GPU desktop (m4-support): toolkit renderer choices only (see session-env).
+MESA_GLTHREAD=false
+GDK_BACKEND=wayland
+GSK_RENDERER=gl
+GDK_DISABLE=vulkan
+QT_QPA_PLATFORM=wayland
+QT_WAYLAND_CLIENT_BUFFER_INTEGRATION=wayland-egl
+QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+QSG_RHI_BACKEND=opengl
+QSG_RENDER_LOOP=basic
+AQ_NO_MODIFIERS=1
+MESA_SHADER_CACHE_DISABLE=true
+XDG_CURRENT_DESKTOP=Hyprland

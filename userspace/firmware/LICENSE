@@ -3,7 +3,7 @@ m4-firmware: firmware files for the owner's own Apple M4 MacBook, extracted from
   /usr/share/licenses/m4-firmware/brcmfmac-provenance.json)
 - brcm/brcmbt4388c2-apple,hostomel-{a,u}.{bin,ptb}  BCM4388 Bluetooth patches
 - apple/aop-als-cal.bin  ambient light sensor calibration
-- apple/isp_2924_01XX.dat  front camera (IMX958) setfile
+- apple/isp_2224_01XX.dat  front camera (IMX958) setfile
 - apple/tpmtfw-j616s.bin  trackpad (MTP) firmware
 They are Apple's / Broadcom's proprietary data. They are installed so the drivers of this machine can load them; they are not to be
 redistributed outside the owner's own machine. regulatory.db is owned by the wireless-regdb package and is not shipped here.

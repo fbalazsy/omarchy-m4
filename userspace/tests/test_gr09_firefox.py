@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SUPPORT = ROOT/'support'
 M4 = SUPPORT/'usr/lib/m4'
 PREFS = SUPPORT/'usr/lib/firefox/defaults/pref/m4-firefox.js'
-AURORA = ROOT.parent/'packages/m4-aurora-mesa'
+AURORA = M4     # m4-support's session-env (the GPU driver is the system Mesa)
 
 
 class DefaultPrefs(unittest.TestCase):
