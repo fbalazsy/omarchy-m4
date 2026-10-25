@@ -7,20 +7,12 @@ local named_desktop = os.getenv("XDG_CURRENT_DESKTOP") or ""
 dofile(home .. "/.config/hypr/hyprland.lua")
 -- Normal defaults set Hyprland alone; preserve the session's name on reload.
 if named_desktop ~= "" then hl.env("XDG_CURRENT_DESKTOP", named_desktop) end
+-- Omarchy's own look (animations, blur, shadows, rounding, borders, the hardware cursor) is left to the user and theme
+-- configuration since 2026-10-25: it ran clean on the aurora GPU stack (owner's live check on 7.3.0-m4.75). Only the
+-- untested render paths below stay pinned.
 hl.config({
   input = { repeat_rate = 40, repeat_delay = 250 },
-  general = { border_size = 0, allow_tearing = false },
-  animations = { enabled = false },
-  decoration = {
-    rounding = 0,
-    active_opacity = 1.0, inactive_opacity = 1.0, fullscreen_opacity = 1.0,
-    blur = { enabled = false },
-    shadow = { enabled = false },
-    glow = { enabled = false },
-    motion_blur = { enabled = false },
-    screen_shader = "",
-  },
-  group = { groupbar = { enabled = false, blur = false } },
+  general = { allow_tearing = false },
   render = {
     cm_enabled = false,
     use_fp16 = 0,
@@ -29,8 +21,7 @@ hl.config({
     direct_scanout = 0,
     use_shader_blur_blend = false,
   },
-  misc = { vrr = 0, session_lock_blur = false },
-  cursor = { no_hardware_cursors = 1 },
+  misc = { vrr = 0 },
   -- X11 clients (Wine games such as Hearthstone) run through Xwayland; native toolkits stay on Wayland below.
   -- At the panel's scale 2, zero scaling lets them render at native resolution (Wine DPI 192) instead of 1x upscaled.
   xwayland = { enabled = true, force_zero_scaling = true },
