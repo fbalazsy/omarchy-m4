@@ -1,0 +1,105 @@
+#!/usr/bin/python3 -I
+"""m4-chromium-policy: Chromium-family browsers decode video in software, as omarchy-mac sets them up on every Apple Silicon Mac.
+
+Run by /usr/lib/m4/session-start as the user, before the session starts. Arch Linux ARM's Chromium has no VA-API but a V4L2 stateless
+decoder: with the AcceleratedVideoDecoder feature (Omarchy enables it for Snapdragon laptops; flags files copied from such a setup carry it)
+it decodes VP9 and AV1 on the AVD and shows every frame solid green (its zero-copy import of the decoder's buffers); H.264 fails its
+setup and falls back. omarchy-mac's setup-user therefore turns the feature off in each Chromium-family *-flags.conf, joining an existing
+--disable-features list (a second --disable-features line would replace the first); mpv, ffmpeg, GStreamer and Firefox keep the AVD.
+
+Each flags file is handled once: its path is recorded in ~/.local/state/m4/chromium-policy.json, so an owner who later removes the feature
+from the list is not overruled. A file a browser install writes afterwards is new and is handled at the next login. Missing files are
+left alone.
+"""
+import json
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+FEATURE = 'AcceleratedVideoDecoder'
+BROWSERS = ('chromium', 'chrome', 'microsoft-edge-stable', 'brave', 'brave-origin')
+DISABLE = re.compile(r'^--disable-features=(\S*)')
+
+
+def write_text(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.exists():
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def with_feature_off(text):
+    """The flags text with FEATURE in every --disable-features list, or a new line for it; None when it is already there."""
+    lines = text.splitlines(keepends=True)
+    found = changed = False
+    for i, line in enumerate(lines):
+        m = DISABLE.match(line)
+        if not m:
+            continue
+        found = True
+        if FEATURE in m.group(1).split(','):
+            continue
+        joined = m.group(1) + ',' + FEATURE if m.group(1) else FEATURE
+        lines[i] = '--disable-features=' + joined + line[m.end():]
+        changed = True
+    if found:
+        return ''.join(lines) if changed else None
+    if text and not text.endswith('\n'):
+        text += '\n'
+    return text + '--disable-features=' + FEATURE + '\n'
+
+
+def flag_files(home, config_home):
+    dirs = [config_home]
+    if config_home != home/'.config':
+        dirs.append(home/'.config')     # browser installs write ~/.config; the launcher reads XDG_CONFIG_HOME
+    return [d/(b + '-flags.conf') for d in dirs for b in BROWSERS]
+
+
+def run(home, config_home):
+    state = home/'.local/state/m4/chromium-policy.json'
+    try:
+        done = [x for x in json.loads(state.read_text()).get('handled', []) if isinstance(x, str)]
+    except (OSError, ValueError, AttributeError):
+        done = []
+    report = []
+    for path in flag_files(home, config_home):
+        if str(path) in done or not path.is_file():
+            continue
+        try:
+            new = with_feature_off(path.read_text())
+            if new is not None:
+                write_text(path, new)
+        except (OSError, UnicodeError) as e:
+            report.append(f'{path}: {e.__class__.__name__}, left alone')
+            continue
+        done.append(str(path))
+        report.append(f'{path}: {"turned off" if new is not None else "already off"}')
+        write_text(state, json.dumps({'handled': sorted(set(done))}, indent=2) + '\n')
+    return '; '.join(report) or 'nothing to do'
+
+
+def main():
+    home = Path(os.environ.get('HOME', ''))
+    if not home.is_absolute() or os.geteuid() == 0:
+        print('m4-chromium-policy: needs the user\'s HOME, not root', file=sys.stderr)
+        return 1
+    xdg = os.environ.get('XDG_CONFIG_HOME', '')
+    config_home = Path(xdg) if xdg.startswith('/') else home/'.config'
+    print('m4-chromium-policy: ' + run(home, config_home))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,5 +1,7 @@
 #!/bin/sh
 # The M4 desktop session (SDDM runs this as the user): bring the shell policy in line with the renderer this session will use, then start
-# UWSM with the M4 Hyprland profile. The policy step never blocks the session.
+# UWSM with the M4 Hyprland profile. The policy steps never block the session; the Chromium one keeps the browsers off the AVD, as
+# omarchy-mac does.
 /usr/lib/m4/shell-policy || true
+/usr/lib/m4/chromium-policy || true
 exec uwsm start -g -1 -e -D Hyprland:M4 -- hyprland.desktop -- --config /usr/share/m4/hyprland.lua
