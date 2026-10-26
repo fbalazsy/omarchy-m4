@@ -9,7 +9,8 @@ dofile(home .. "/.config/hypr/hyprland.lua")
 if named_desktop ~= "" then hl.env("XDG_CURRENT_DESKTOP", named_desktop) end
 -- Omarchy's own look (animations, blur, shadows, rounding, borders, the hardware cursor) is left to the user and theme
 -- configuration since 2026-10-25: it ran clean on the aurora GPU stack (owner's live check on 7.3.0-m4.75). Only the
--- untested render paths below stay pinned.
+-- untested render paths below stay pinned. VRR is on: the kernel offers it only where the DCP programs adaptive sync
+-- (aurora-silicon/linux#451 on the desktop 26.6 firmware); without that kernel no output is VRR-capable.
 hl.config({
   input = { repeat_rate = 40, repeat_delay = 250 },
   general = { allow_tearing = false },
@@ -21,7 +22,7 @@ hl.config({
     direct_scanout = 0,
     use_shader_blur_blend = false,
   },
-  misc = { vrr = 0 },
+  misc = { vrr = 1 },
   -- X11 clients (Wine games such as Hearthstone) run through Xwayland; native toolkits stay on Wayland below.
   -- At the panel's scale 2, zero scaling lets them render at native resolution (Wine DPI 192) instead of 1x upscaled.
   xwayland = { enabled = true, force_zero_scaling = true },
@@ -45,8 +46,8 @@ if o then
   o.bind("SUPER + SHIFT + XF86MonBrightnessUp", "Keyboard backlight cycle", "omarchy-brightness-keyboard cycle")
 end
 
--- The display driver marks the 60 Hz mode preferred and the user config asks for "preferred": run the internal panel at its highest rate like
--- the greeter. Scoped to eDP-1, after the user config, so rules for external displays still apply; inside pcall so an error cannot skip the above.
+-- Hyprland resolves "preferred" to 60 Hz on the internal panel although the driver flags 120 Hz preferred: run it at its highest rate
+-- like the greeter. Scoped to eDP-1, after the user config, so rules for external displays still apply; inside pcall so an error cannot skip the above.
 pcall(function()
   hl.monitor({ output = "eDP-1", mode = "highrr", position = "auto", scale = 2 })
 end)

@@ -26,7 +26,7 @@
 
 **Doesn't work yet:**
 - external display, SD card, Touch ID;
-- VRR: off by default; turning it on black-screened the panel until a reboot on 7.1.12 (P1; the likely fix is in the 7.3 daily kernel, untested);
+- VRR: on (m4-support 1.0-52, `misc:vrr 1`); the kernel offers it once the DCP programs adaptive sync (aurora-silicon/linux#451 on the desktop 26.6 firmware: internal panel 3456x2234@120 `VRR=YES`, tested 2026-10-27 on 7.3.0-m4.124); without that kernel no output is VRR-capable. On 7.1.12 it black-screened the panel until a reboot;
 - USB3 after a suspend: untested here; on fbalazsy's J616s every plug after s2idle stays USB2 until a reboot. Our fix (always-on `ps_atcN_phymxwrap` `fade1967e` + RTKit session reset `4eb7188da`) is in m4.18: the owner's test decides it, then the follow-up PR;
 - Apple TSO for x86 emulation (FEX/muvm): the CPU advertises it but the control bit is locked;
 - GPU limits: ray tracing hidden (G-04), one queue (G-11), compression off (G-12);
