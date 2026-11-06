@@ -16,3 +16,6 @@ __pycache__/
 *.journal
 *.raw
 private/
+# 1TR phone relay runtime: session token and disk inventory
+/tools/1tr-phone-relay/state/
+/tools/1tr-phone-relay/results/
