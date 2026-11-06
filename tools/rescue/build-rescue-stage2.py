@@ -163,8 +163,20 @@ def main():
         raise SystemExit("early cpio not after size")
     if out[SIZE_AT + 4 + total:SIZE_AT + 4 + total + 16] != b"chosen.bootargs=":
         raise SystemExit("bootargs shifted wrong")
-    pathlib.Path(sys.argv[2]).write_bytes(out)
-    print(hashlib.sha256(out).hexdigest(), len(out))
+    out_path = pathlib.Path(sys.argv[2])
+    out_path.write_bytes(out)
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from macho_boot_object import wrap
+    macho = wrap(bytes(out))
+    macho_path = out_path.with_suffix(".macho")
+    macho_path.write_bytes(macho)
+    if b"__TEXT_BOOT_EXEC" in macho:
+        raise SystemExit("wrapped object has __TEXT_BOOT_EXEC")
+    image_at = 0x10000
+    if macho[image_at + 0x808:image_at + 0x808 + 8] != b"AURALOAD":
+        raise SystemExit("wrapped raw image lost AURALOAD")
+    print(hashlib.sha256(out).hexdigest(), len(out), "raw")
+    print(hashlib.sha256(macho).hexdigest(), len(macho), "macho")
 
 
 if __name__ == "__main__":
