@@ -166,6 +166,122 @@ class StaticTests(unittest.TestCase):
         compile(self.relay_src, str(SRC / "phone_relay.py"), "exec")
 
 
+class AddressTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(tempfile.mkdtemp(prefix="1tr-addr-"))
+        cls.relay = load_relay(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def test_ifreq_parser_reads_ipv4(self):
+        raw = bytearray(40)
+        raw[:2] = b"lo"
+        struct_mod = __import__("struct")
+        socket_mod = __import__("socket")
+        struct_mod.pack_into("<H", raw, 16, socket_mod.AF_INET)
+        raw[20:24] = socket_mod.inet_aton("127.0.0.1")
+        self.assertEqual(self.relay._parse_ifreq_buf(bytes(raw), 40), [("lo", "127.0.0.1")])
+        raw[16:18] = b"\x00\x00"
+        self.assertEqual(self.relay._parse_ifreq_buf(bytes(raw), 40), [])
+
+    def test_ioctl_finds_loopback_without_netlink(self):
+        original = self.relay._ipv4s_ip_command
+        self.relay._ipv4s_ip_command = lambda: (_ for _ in ()).throw(OSError("netlink denied"))
+        try:
+            found = self.relay.ipv4s()
+        finally:
+            self.relay._ipv4s_ip_command = original
+        self.assertEqual(self.relay.SCAN["ip"], "failed")
+        self.assertTrue(any(ip == "127.0.0.1" for _iface, ip in found))
+        for _iface, ip in found:
+            self.assertTrue(self.relay._assigned_here(ip))
+
+    def test_unassigned_forced_address_is_ignored(self):
+        original = self.relay.ipv4s
+        self.relay.ipv4s = lambda: []
+        previous_lan = os.environ.get("FORCE_LAN_IP")
+        previous_ts = os.environ.get("FORCE_TS_IP")
+        missing_private = ".".join(["192", "168", "50", "50"])
+        missing_cgnat = ".".join(["100", "64", "8", "8"])
+        os.environ["FORCE_LAN_IP"] = missing_private
+        os.environ["FORCE_TS_IP"] = missing_cgnat
+        try:
+            self.assertEqual(self.relay.lan_endpoints(), [])
+            self.assertEqual(self.relay.tailscale_ips(), [])
+        finally:
+            self.relay.ipv4s = original
+            if previous_lan is None:
+                os.environ.pop("FORCE_LAN_IP", None)
+            else:
+                os.environ["FORCE_LAN_IP"] = previous_lan
+            if previous_ts is None:
+                os.environ.pop("FORCE_TS_IP", None)
+            else:
+                os.environ["FORCE_TS_IP"] = previous_ts
+
+    def test_hotspot_choice_skips_cellular_and_prefers_ap(self):
+        station = ".".join(["192", "168", "1", "20"])
+        hotspot = ".".join(["192", "168", "43", "1"])
+        cellular = ".".join(["10", "8", "0", "2"])
+        self.assertEqual(
+            self.relay._select_hotspot([
+                ("wlan0", station),
+                ("ap0", hotspot),
+                ("rmnet_data0", cellular),
+            ]),
+            [("ap0", hotspot)],
+        )
+        self.assertEqual(self.relay._select_hotspot([("wlan0", station)]), [("wlan0", station)])
+        self.assertEqual(self.relay._select_hotspot([("rmnet0", cellular)]), [])
+
+    def test_tailscale_choice_rejects_carrier_nat(self):
+        cgnat = ".".join(["100", "64", "8", "8"])
+        self.assertEqual(self.relay._select_tailscale([("rmnet_data0", cgnat)], None), [])
+        self.assertEqual(self.relay._select_tailscale([("tailscale0", cgnat)], None), [cgnat])
+        self.assertEqual(self.relay._select_tailscale([], "127.0.0.1"), ["127.0.0.1"])
+        self.assertEqual(self.relay._select_tailscale([], cgnat), [])
+
+    def test_request_log_redacts_session_token(self):
+        token = "synthetic-test-session-token"
+        redacted = self.relay._redact_request_target(
+            "GET /s/%s/bootstrap HTTP/1.1" % token
+        )
+        self.assertNotIn(token, redacted)
+        self.assertIn("/s/redacted/bootstrap", redacted)
+
+    def test_missing_address_card_does_not_assume_radios_are_off(self):
+        original = self.relay.ipv4s
+        self.relay.ipv4s = lambda: []
+        previous_lan = os.environ.get("FORCE_LAN_IP")
+        previous_ts = os.environ.get("FORCE_TS_IP")
+        os.environ["FORCE_LAN_IP"] = ""
+        os.environ["FORCE_TS_IP"] = ""
+        stdout = io.StringIO()
+        try:
+            with __import__("contextlib").redirect_stdout(stdout):
+                self.relay.write_phone_card()
+        finally:
+            self.relay.ipv4s = original
+            if previous_lan is None:
+                os.environ.pop("FORCE_LAN_IP", None)
+            else:
+                os.environ["FORCE_LAN_IP"] = previous_lan
+            if previous_ts is None:
+                os.environ.pop("FORCE_TS_IP", None)
+            else:
+                os.environ["FORCE_TS_IP"] = previous_ts
+        text = (self.relay.STATE / "PHONE-CARD.txt").read_text(encoding="utf-8")
+        self.assertIn("does not mean the hotspot is off", text)
+        self.assertIn("No address was guessed", text)
+        self.assertIn("official app can be connected", text)
+        self.assertIn("not listening on the hotspot", text)
+        self.assertNotIn("Paste this ONE line", text)
+        self.assertNotIn("100.x", text)
+
+
 class ClientTests(unittest.TestCase):
     def test_client_runs_only_allowlisted_commands(self):
         work = Path(tempfile.mkdtemp(prefix="1tr-client-"))
@@ -570,7 +686,12 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), hashlib.sha256((SRC / "phone_relay.py").read_bytes()).hexdigest())
         card = home / ".local/share/1tr-phone-relay/state/PHONE-CARD.txt"
         self.assertEqual(stat.S_IMODE(card.stat().st_mode), 0o600)
-        self.assertIn("127.0.0.1", card.read_text(encoding="utf-8"))
+        card_text = card.read_text(encoding="utf-8")
+        self.assertTrue(
+            "Paste this ONE line" in card_text or "Paste ONE of these lines" in card_text,
+            "relay did not print a paste line",
+        )
+        self.assertNotIn("__BASE__", card_text)
 
         bad_http = serve(bad)
         self.addCleanup(bad_http.shutdown)

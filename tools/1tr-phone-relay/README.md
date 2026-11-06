@@ -39,7 +39,8 @@ The relay does not mount or unmount disks, erase or partition anything, run `ble
 
 - The hotspot side is plain HTTP. Use a hotspot with no other clients. Anyone who can read the session URL can fetch the inventory script and post result text. They still cannot queue commands on that port.
 - The session token is created when the relay starts, printed only on the phone, and stored in `state/session` mode `0600`. It is not in this tree.
-- MCP listens on the phone's Tailscale address only and has no second bearer. Anyone on that tailnet who can open the port can queue the allowlist and read stored results. Do not share the VPN with hotspot clients.
+- Address discovery uses `SIOCGIFADDR` because Android denies Termux the netlink socket `ip` needs. A missing address is not treated as proof that the hotspot or the official Tailscale app is off, and no address is invented. The paste line is printed only for a private address this process can actually see. Cellular interfaces are not used.
+- MCP listens only on a Tailscale-shaped interface assigned inside Termux, or on loopback when that was explicitly bound for a test. It is not bound to `0.0.0.0`. The official Android Tailscale app's VPN is not visible to Termux and does not forward inbound tailnet connections to this process, so MCP stays off in that case rather than opening the queue on the hotspot. Anyone who can open a started MCP port can queue the allowlist and read stored results. Do not share the VPN with hotspot clients.
 - Results are disk inventory. They stay on the phone (`results/`, mode `0600`) and must not be committed or pasted into chat.
 - The relay stops after two hours, or sooner with Ctrl-C or `request_stop`.
 
@@ -59,9 +60,9 @@ They check the allowlist, rejection of unknown operations, Host-header filtering
 2. Give Termux a network path to GitHub and the Termux package mirror before the hotspot takes the Wi-Fi. On many phones the hotspot uses mobile data and disconnects Wi-Fi.
 3. Run the one command above (or the shortened link, after its SHA256 is checked against the report). The first run waits while `pkg` downloads Python.
 4. If Termux asks you to pick a mirror, finish `termux-change-repo` and run the command again. If `pkg install` fails on an old install, run `pkg upgrade` once and run the command again.
-5. Turn the hotspot on. Keep Termux in the foreground. If the hotspot address appears after the relay starts, the phone prints a new paste line.
+5. Turn the hotspot on. Keep Termux in the foreground. If a hotspot address becomes visible after the relay starts, the phone prints a new paste line. If it still says no private address is visible, Android is hiding the tether interface; do not type an address.
 6. Boot the Mac into 1TR, join that hotspot, and paste the one line shown on the phone into the recovery Terminal. That line is a secret. Do not put it in chat, GitHub, or a shortener.
-7. Connect the official Tailscale app when a bot should use the MCP URL printed on the phone.
+7. The official Tailscale app does not make MCP reachable. MCP is printed only when Termux itself has a bindable tailnet address. Do not type the IP shown in the official app.
 8. Stop with Ctrl-C. Inventory files remain on the phone until you delete that directory.
 
 Live Android, hotspot routing, Termux address visibility and tailnet reachability are not verified here.

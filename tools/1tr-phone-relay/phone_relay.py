@@ -8,6 +8,8 @@ never part of the published tree.
 """
 from __future__ import annotations
 
+import ctypes
+import fcntl
 import hmac
 import ipaddress
 import json
@@ -16,6 +18,7 @@ import queue
 import re
 import secrets
 import socket
+import struct
 import sys
 import threading
 import time
@@ -40,6 +43,21 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")
 _SESSION_RE = re.compile(r"[A-Za-z0-9_-]{16,128}")
 _IPV4_RE = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
 _IFACE_RE = re.compile(r"[A-Za-z0-9_.:-]{1,32}")
+# Android hotspot interface names vary by vendor. wlan0 is usually the
+# station radio, so it is not preferred over an ap/swlan interface.
+_AP_RE = re.compile(
+    r"^(?:ap\d+|swlan\d+|softap\d*|wlan[1-9]\d*|wifi-ap\d*|ap_br_wlan\d*|tether\d*|rndis\d+|bt-pan\d*)$",
+    re.I,
+)
+_CELL_RE = re.compile(r"^(?:rmnet|ccmni|wwan|pdp|v4-rmnet)", re.I)
+# Carrier NAT uses the same 100.64.0.0/10 block as Tailscale. Only a tun-like
+# interface is treated as the tailnet. A cellular name must never host MCP.
+_TS_IFACE_RE = re.compile(r"^(?:tailscale\d*|tun\d*|wg\d*)$", re.I)
+_SIOCGIFCONF = 0x8912
+_SIOCGIFADDR = 0x8915
+_SIOCGIFFLAGS = 0x8913
+_IFF_UP = 0x1
+SCAN = {"ioctl": 0, "ip": "skip"}
 _CMD_RE = re.compile(
     r"^curl -fsSL --max-time 60 "
     r"http://(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}/s/[A-Za-z0-9_-]+/bootstrap "
@@ -145,33 +163,189 @@ def rate_ok(bucket: str) -> bool:
         return True
 
 
-def ipv4s() -> list[tuple[str, str]]:
-    """Return (iface, ip) for up IPv4 addresses."""
+def _ifreq_size() -> int:
+    # On 64-bit Linux, struct ifmap makes ifreq 40 bytes. On 32-bit it is 32.
+    return 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 32
+
+
+def _parse_ifreq_buf(raw: bytes, size: int) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
-    try:
-        import subprocess
-        out = subprocess.check_output(
-            ["ip", "-4", "-o", "addr", "show"], text=True, stderr=subprocess.DEVNULL
-        )
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) < 4:
-                continue
-            ip = _clean_ipv4(parts[3].split("/")[0])
-            if ip:
-                found.append((_iface_label(parts[1]), ip))
-    except Exception:
-        pass
-    if not found:
-        hostname = socket.gethostname()
-        try:
-            for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-                ip = _clean_ipv4(info[4][0])
-                if ip:
-                    found.append(("host", ip))
-        except Exception:
-            pass
+    if size < 24 or len(raw) % size != 0:
+        return found
+    for off in range(0, len(raw), size):
+        name = raw[off:off + 16].split(b"\0", 1)[0].decode("ascii", "ignore")
+        if not _IFACE_RE.fullmatch(name):
+            continue
+        family = struct.unpack_from("<H", raw, off + 16)[0]
+        if family != socket.AF_INET:
+            continue
+        ip = _clean_ipv4(socket.inet_ntoa(raw[off + 20:off + 24]))
+        if ip:
+            found.append((name, ip))
     return found
+
+
+def _assigned_here(ip: str) -> bool:
+    """True only when this process can bind the address. Never invent one."""
+    cleaned = _clean_ipv4(ip)
+    if cleaned is None:
+        return False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind((cleaned, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _iface_up(sock: socket.socket, name: str, size: int) -> bool:
+    buf = bytearray(size)
+    encoded = name.encode()[:15]
+    buf[:len(encoded)] = encoded
+    try:
+        fcntl.ioctl(sock.fileno(), _SIOCGIFFLAGS, buf, True)
+    except OSError:
+        return True
+    flags = struct.unpack_from("<H", buf, 16)[0]
+    return bool(flags & _IFF_UP)
+
+
+def _ipv4_on_iface(sock: socket.socket, name: str, size: int) -> str | None:
+    if not _IFACE_RE.fullmatch(name):
+        return None
+    buf = bytearray(size)
+    encoded = name.encode()[:15]
+    buf[:len(encoded)] = encoded
+    try:
+        fcntl.ioctl(sock.fileno(), _SIOCGIFADDR, buf, True)
+    except OSError:
+        return None
+    family = struct.unpack_from("<H", buf, 16)[0]
+    if family != socket.AF_INET:
+        return None
+    return _clean_ipv4(socket.inet_ntoa(buf[20:24]))
+
+
+def _ipv4s_ifconf(sock: socket.socket) -> list[tuple[str, str]]:
+    size = _ifreq_size()
+    raw_buf = ctypes.create_string_buffer(size * 64)
+
+    class _IfConf(ctypes.Structure):
+        _fields_ = [("ifc_len", ctypes.c_int), ("ifc_buf", ctypes.c_void_p)]
+
+    conf = _IfConf(size * 64, ctypes.cast(raw_buf, ctypes.c_void_p))
+    try:
+        fcntl.ioctl(sock.fileno(), _SIOCGIFCONF, conf)
+    except OSError:
+        return []
+    return _parse_ifreq_buf(raw_buf.raw[:max(conf.ifc_len, 0)], size)
+
+
+def _ipv4s_ioctl() -> list[tuple[str, str]]:
+    """Read IPv4 addresses with SIOCGIFADDR.
+
+    Android 13 denies Termux the netlink socket that `ip` needs
+    (`Cannot bind netlink socket: Permission denied`) and hides /proc/net.
+    ioctl is the path `ifconfig` still uses for addresses that exist in
+    this app's network namespace.
+    """
+    found: list[tuple[str, str]] = []
+    size = _ifreq_size()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        names: list[str] = []
+        try:
+            names = sorted(os.listdir("/sys/class/net"))
+        except OSError:
+            names = []
+        if not names:
+            names = [iface for iface, _ip in _ipv4s_ifconf(sock)]
+        seen: set[tuple[str, str]] = set()
+        for name in names:
+            ip = _ipv4_on_iface(sock, name, size)
+            if not ip or not _iface_up(sock, name, size):
+                continue
+            row = (_iface_label(name), ip)
+            if row not in seen:
+                seen.add(row)
+                found.append(row)
+        if not found:
+            for iface, ip in _ipv4s_ifconf(sock):
+                row = (_iface_label(iface), ip)
+                if row not in seen:
+                    seen.add(row)
+                    found.append(row)
+    finally:
+        sock.close()
+    return found
+
+
+def _ipv4s_ip_command() -> list[tuple[str, str]]:
+    import subprocess
+    out = subprocess.check_output(
+        ["ip", "-4", "-o", "addr", "show"], text=True, stderr=subprocess.DEVNULL
+    )
+    found: list[tuple[str, str]] = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        ip = _clean_ipv4(parts[3].split("/")[0])
+        if ip:
+            found.append((_iface_label(parts[1]), ip))
+    return found
+
+
+def ipv4s() -> list[tuple[str, str]]:
+    """Return (iface, ip) for IPv4 addresses visible inside this process."""
+    found: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(rows: list[tuple[str, str]]) -> None:
+        for iface, ip in rows:
+            row = (_iface_label(iface), ip)
+            if row[1] and row not in seen:
+                seen.add(row)
+                found.append(row)
+
+    ioctl_rows = _ipv4s_ioctl()
+    SCAN["ioctl"] = len(ioctl_rows)
+    add(ioctl_rows)
+    try:
+        add(_ipv4s_ip_command())
+        SCAN["ip"] = "ok"
+    except Exception:
+        SCAN["ip"] = "failed"
+    return found
+
+
+def _select_hotspot(found: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    preferred = [(iface, ip) for iface, ip in found if _AP_RE.fullmatch(iface)]
+    if preferred:
+        return preferred
+    private = [
+        (iface, ip) for iface, ip in found
+        if classify_ip(ip) == "private" and not _CELL_RE.match(iface)
+    ]
+    if private:
+        return private
+    return [(iface, ip) for iface, ip in found if classify_ip(ip) == "loopback"]
+
+
+def _select_tailscale(found: list[tuple[str, str]], forced: str | None) -> list[str]:
+    ips = [
+        ip for iface, ip in found
+        if classify_ip(ip) == "tailscale" and _TS_IFACE_RE.fullmatch(iface)
+    ]
+    if forced and _assigned_here(forced):
+        kind = classify_ip(forced)
+        if kind == "loopback":
+            ips.insert(0, forced)
+        elif kind == "tailscale" and forced in ips:
+            ips = [forced] + [ip for ip in ips if ip != forced]
+    return list(dict.fromkeys(ips))
 
 
 def classify_ip(ip: str) -> str:
@@ -190,15 +364,21 @@ def classify_ip(ip: str) -> str:
 
 def lan_endpoints() -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
-    extra = _clean_ipv4(os.environ.get("FORCE_LAN_IP") or "")
-    if extra:
-        found.append(("forced", extra))
-    seen = {ip for _, ip in found}
+    seen: set[str] = set()
     for iface, ip in ipv4s():
-        if classify_ip(ip) == "private" and ip not in seen:
-            found.append((iface, ip))
-            seen.add(ip)
-    return found
+        if classify_ip(ip) != "private" or _CELL_RE.match(iface) or ip in seen:
+            continue
+        seen.add(ip)
+        found.append((iface, ip))
+    extra = _clean_ipv4(os.environ.get("FORCE_LAN_IP") or "")
+    if (
+        extra
+        and extra not in seen
+        and _assigned_here(extra)
+        and classify_ip(extra) in {"private", "loopback"}
+    ):
+        found.insert(0, ("forced", extra))
+    return _select_hotspot(found)
 
 
 def hotspot_ips() -> list[str]:
@@ -206,11 +386,10 @@ def hotspot_ips() -> list[str]:
 
 
 def tailscale_ips() -> list[str]:
-    ips = [ip for _, ip in ipv4s() if classify_ip(ip) == "tailscale"]
-    extra = _clean_ipv4(os.environ.get("FORCE_TS_IP") or "")
-    if extra:
-        ips = [extra] + [i for i in ips if i != extra]
-    return list(dict.fromkeys(ips))
+    # A forced address is accepted only when this process can bind it, and
+    # only for loopback or a CGNAT address already seen on a tun-like iface.
+    # An address typed from the official app is not assigned inside Termux.
+    return _select_tailscale(ipv4s(), _clean_ipv4(os.environ.get("FORCE_TS_IP") or ""))
 
 
 def public_base(host_header: str) -> str:
@@ -282,9 +461,23 @@ def _content_length(handler: BaseHTTPRequestHandler, limit: int) -> int | None:
     return n
 
 
+def _redact_request_target(requestline: str) -> str:
+    parts = requestline.split(" ")
+    if len(parts) < 2:
+        return requestline
+    segments = parts[1].split("/")
+    if len(segments) >= 3 and segments[1] == "s" and segments[2]:
+        segments[2] = "redacted"
+        parts[1] = "/".join(segments)
+    return " ".join(parts)
+
+
 class _Base(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     bucket = "lan"
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        self.log_message('"%s" %s', _redact_request_target(self.requestline), code)
 
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("%s %s - %s\n" % (self.server.role, self.log_date_time_string(), fmt % args))
@@ -609,14 +802,18 @@ def write_phone_card() -> None:
             lines.append("%s" % _iface_label(iface))
             lines.append(_paste_line(ip))
     else:
-        lines.append("No private hotspot IP detected yet. Enable Wi-Fi hotspot; this card refreshes once an address appears.")
+        lines.append("No private IPv4 address is visible to Termux.")
+        lines.append("That does not mean the hotspot is off. Android often hides tether addresses from apps.")
+        lines.append("The relay is listening. This card refreshes if an address becomes visible. No address was guessed.")
     lines.append("")
     if tips:
         lines.append("MCP URL for the Tailscale plugin (tailnet only, no extra bearer):")
         lines.append("http://%s:%s/mcp" % (tips[0], MCP_PORT))
     else:
-        lines.append("No Tailscale CGNAT IP (100.x) visible to Termux yet.")
-        lines.append("Keep the official Tailscale app connected; the card refreshes if it appears.")
+        lines.append("No Tailscale address is assigned inside Termux.")
+        lines.append("The official app can be connected and still be invisible here.")
+        lines.append("Android does not show that VPN to other apps, and it does not deliver inbound tailnet connections to Termux.")
+        lines.append("MCP is not started and is not listening on the hotspot.")
     lines.append("Do not enable allow-hotspot-clients to use the VPN.")
     lines.append("Do not copy this card into chat or a public URL.")
     text = "\n".join(lines) + "\n"
@@ -645,7 +842,9 @@ def main() -> int:
     servers.append(lan)
     threading.Thread(target=serve, args=(lan,), daemon=True).start()
 
+    print("address scan: ioctl=%s ip=%s" % (SCAN["ioctl"], SCAN["ip"]), flush=True)
     tips = tailscale_ips()
+    mcp_failed: set[str] = set()
     if tips:
         try:
             mcp = RoleServer((tips[0], MCP_PORT), McpHandler, "mcp")
@@ -653,10 +852,11 @@ def main() -> int:
             threading.Thread(target=serve, args=(mcp,), daemon=True).start()
             print("mcp listening on %s:%s" % (tips[0], MCP_PORT), flush=True)
         except OSError as e:
-            print("mcp bind failed on %s: %s" % (tips[0], e), flush=True)
+            mcp_failed.add(tips[0])
+            print("mcp bind failed (%s); not listening on all interfaces" % e, flush=True)
             tips = []
     else:
-        print("mcp not started (no tailscale IP)", flush=True)
+        print("mcp not started (no tailscale address assigned in Termux)", flush=True)
 
     print("lan listening on 0.0.0.0:%s" % LAN_PORT, flush=True)
     printed_hotspot = bool(hotspot_ips())
@@ -667,17 +867,19 @@ def main() -> int:
                 printed_hotspot = True
                 write_phone_card()
                 print("hotspot address appeared; card refreshed", flush=True)
-            if not tips and tailscale_ips() and not any(getattr(s, "role", "") == "mcp" for s in servers):
-                tips = tailscale_ips()
+            if not any(getattr(s, "role", "") == "mcp" for s in servers):
+                candidates = [ip for ip in tailscale_ips() if ip not in mcp_failed]
+                if not candidates:
+                    continue
                 try:
-                    mcp = RoleServer((tips[0], MCP_PORT), McpHandler, "mcp")
+                    mcp = RoleServer((candidates[0], MCP_PORT), McpHandler, "mcp")
                     servers.append(mcp)
                     threading.Thread(target=serve, args=(mcp,), daemon=True).start()
                     write_phone_card()
-                    print("mcp late-start on %s:%s" % (tips[0], MCP_PORT), flush=True)
+                    print("mcp late-start on %s:%s" % (candidates[0], MCP_PORT), flush=True)
                 except OSError as e:
-                    print("mcp late bind failed: %s" % e, flush=True)
-                    break
+                    mcp_failed.add(candidates[0])
+                    print("mcp bind failed (%s); LAN relay keeps running" % e, flush=True)
     finally:
         STOP.set()
         print("relay stopping", flush=True)
