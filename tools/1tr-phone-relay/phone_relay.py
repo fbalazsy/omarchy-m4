@@ -386,10 +386,37 @@ def hotspot_ips() -> list[str]:
 
 
 def tailscale_ips() -> list[str]:
-    # A forced address is accepted only when this process can bind it, and
-    # only for loopback or a CGNAT address already seen on a tun-like iface.
-    # An address typed from the official app is not assigned inside Termux.
+    # A forced address is printed only when this process can bind it, and only
+    # for loopback or a CGNAT address already seen on a tun-like interface.
+    # Not seeing the official app's address is not the same as traffic failing
+    # to arrive: that address often is not assigned inside Termux.
     return _select_tailscale(ipv4s(), _clean_ipv4(os.environ.get("FORCE_TS_IP") or ""))
+
+
+def _mcp_peer_ok(local_ip: str, peer_ip: str) -> bool:
+    """Whether a privileged MCP connection may be read.
+
+    The official Android client delivers tailnet TCP to an ordinary listener
+    (Termux sshd works this way; Tailscale staff, issue 20209). Termux often
+    cannot discover or bind the VPN address, so the listener is every
+    interface. The request is read only when both the destination and the
+    peer are in the Tailscale range, or both are loopback. Loopback is not
+    reachable from the hotspot. A hotspot client, including one aimed at the
+    tailnet address, is closed before the command is read.
+    """
+    local = _clean_ipv4(local_ip)
+    peer = _clean_ipv4(peer_ip)
+    if local is None or peer is None:
+        return False
+    try:
+        local_addr = ipaddress.ip_address(local)
+        peer_addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    if local_addr.is_loopback and peer_addr.is_loopback:
+        return True
+    cgnat = ipaddress.ip_network("100.64.0.0/10")
+    return local_addr in cgnat and peer_addr in cgnat
 
 
 def public_base(host_header: str) -> str:
@@ -762,6 +789,16 @@ class RoleServer(ThreadingHTTPServer):
         super().__init__(addr, handler)
         self.role = role
 
+    def verify_request(self, request, client_address) -> bool:
+        if self.role != "mcp":
+            return True
+        try:
+            local = request.getsockname()[0]
+            peer = client_address[0]
+        except (OSError, IndexError, TypeError):
+            return False
+        return _mcp_peer_ok(local, peer)
+
 
 def serve(httpd: RoleServer) -> None:
     httpd.timeout = 0.5
@@ -806,14 +843,15 @@ def write_phone_card() -> None:
         lines.append("That does not mean the hotspot is off. Android often hides tether addresses from apps.")
         lines.append("The relay is listening. This card refreshes if an address becomes visible. No address was guessed.")
     lines.append("")
-    if tips:
-        lines.append("MCP URL for the Tailscale plugin (tailnet only, no extra bearer):")
-        lines.append("http://%s:%s/mcp" % (tips[0], MCP_PORT))
+    visible = [ip for ip in tips if classify_ip(ip) == "tailscale"]
+    lines.append("MCP reads a request only when both its destination and its peer are Tailscale addresses.")
+    lines.append("Hotspot clients are closed before any command is read.")
+    if visible:
+        lines.append("MCP URL (address seen on an interface in this process, not guessed):")
+        lines.append("http://%s:%s/mcp" % (visible[0], MCP_PORT))
     else:
-        lines.append("No Tailscale address is assigned inside Termux.")
-        lines.append("The official app can be connected and still be invisible here.")
-        lines.append("Android does not show that VPN to other apps, and it does not deliver inbound tailnet connections to Termux.")
-        lines.append("MCP is not started and is not listening on the hotspot.")
+        lines.append("No Tailscale address is visible inside Termux. The official app can still deliver connections to this listener.")
+        lines.append("The host to dial is the address shown in the official Tailscale app. It is not guessed here.")
     lines.append("Do not enable allow-hotspot-clients to use the VPN.")
     lines.append("Do not copy this card into chat or a public URL.")
     text = "\n".join(lines) + "\n"
@@ -843,23 +881,20 @@ def main() -> int:
     threading.Thread(target=serve, args=(lan,), daemon=True).start()
 
     print("address scan: ioctl=%s ip=%s" % (SCAN["ioctl"], SCAN["ip"]), flush=True)
-    tips = tailscale_ips()
-    mcp_failed: set[str] = set()
-    if tips:
-        try:
-            mcp = RoleServer((tips[0], MCP_PORT), McpHandler, "mcp")
-            servers.append(mcp)
-            threading.Thread(target=serve, args=(mcp,), daemon=True).start()
-            print("mcp listening on %s:%s" % (tips[0], MCP_PORT), flush=True)
-        except OSError as e:
-            mcp_failed.add(tips[0])
-            print("mcp bind failed (%s); not listening on all interfaces" % e, flush=True)
-            tips = []
-    else:
-        print("mcp not started (no tailscale address assigned in Termux)", flush=True)
+    # INADDR_ANY so the official Android client can deliver tailnet TCP the way
+    # it delivers a normal Termux sshd. verify_request drops every other peer
+    # before the HTTP request is read. There is no enqueue on the LAN port.
+    try:
+        mcp = RoleServer(("0.0.0.0", MCP_PORT), McpHandler, "mcp")
+        servers.append(mcp)
+        threading.Thread(target=serve, args=(mcp,), daemon=True).start()
+        print("mcp listening on 0.0.0.0:%s; non-tailnet connections are closed first" % MCP_PORT, flush=True)
+    except OSError as e:
+        print("mcp bind failed (%s); LAN relay keeps running" % e, flush=True)
 
     print("lan listening on 0.0.0.0:%s" % LAN_PORT, flush=True)
     printed_hotspot = bool(hotspot_ips())
+    printed_tailnet = any(classify_ip(ip) == "tailscale" for ip in tailscale_ips())
     try:
         while not STOP.is_set() and not expired():
             time.sleep(0.4)
@@ -867,19 +902,10 @@ def main() -> int:
                 printed_hotspot = True
                 write_phone_card()
                 print("hotspot address appeared; card refreshed", flush=True)
-            if not any(getattr(s, "role", "") == "mcp" for s in servers):
-                candidates = [ip for ip in tailscale_ips() if ip not in mcp_failed]
-                if not candidates:
-                    continue
-                try:
-                    mcp = RoleServer((candidates[0], MCP_PORT), McpHandler, "mcp")
-                    servers.append(mcp)
-                    threading.Thread(target=serve, args=(mcp,), daemon=True).start()
-                    write_phone_card()
-                    print("mcp late-start on %s:%s" % (candidates[0], MCP_PORT), flush=True)
-                except OSError as e:
-                    mcp_failed.add(candidates[0])
-                    print("mcp bind failed (%s); LAN relay keeps running" % e, flush=True)
+            if not printed_tailnet and any(classify_ip(ip) == "tailscale" for ip in tailscale_ips()):
+                printed_tailnet = True
+                write_phone_card()
+                print("tailscale address became visible; card refreshed", flush=True)
     finally:
         STOP.set()
         print("relay stopping", flush=True)

@@ -276,10 +276,25 @@ class AddressTests(unittest.TestCase):
         text = (self.relay.STATE / "PHONE-CARD.txt").read_text(encoding="utf-8")
         self.assertIn("does not mean the hotspot is off", text)
         self.assertIn("No address was guessed", text)
-        self.assertIn("official app can be connected", text)
-        self.assertIn("not listening on the hotspot", text)
+        self.assertIn("official app can still deliver", text)
+        self.assertIn("It is not guessed here", text)
+        self.assertIn("closed before any command is read", text)
         self.assertNotIn("Paste this ONE line", text)
         self.assertNotIn("100.x", text)
+
+    def test_mcp_accepts_only_tailnet_or_loopback(self):
+        relay = self.relay
+        peer = ".".join(["100", "64", "1", "2"])
+        local = ".".join(["100", "64", "1", "3"])
+        hotspot_dest = ".".join(["192", "168", "43", "1"])
+        hotspot_peer = ".".join(["192", "168", "43", "20"])
+        self.assertTrue(relay._mcp_peer_ok(local, peer))
+        self.assertTrue(relay._mcp_peer_ok("127.0.0.1", "127.0.0.1"))
+        self.assertFalse(relay._mcp_peer_ok(hotspot_dest, hotspot_peer))
+        self.assertFalse(relay._mcp_peer_ok(local, hotspot_peer))
+        self.assertFalse(relay._mcp_peer_ok(hotspot_dest, peer))
+        self.assertFalse(relay._mcp_peer_ok("127.0.0.1", peer))
+        self.assertFalse(relay._mcp_peer_ok("", peer))
 
 
 class ClientTests(unittest.TestCase):
