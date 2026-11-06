@@ -9,10 +9,10 @@ This is a diagnostic allowlist. It is not a remote shell.
 Install Termux from F-Droid or the official Termux GitHub releases. In Termux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fbalazsy/omarchy-m4/904e5c788660375104ebcedbf18003ea080754bf/tools/1tr-phone-relay/termux-bootstrap.sh | sh
+curl -fsSL https://raw.githubusercontent.com/fbalazsy/omarchy-m4/b575130ce49608f618a27ed97d60784dff0de37d/tools/1tr-phone-relay/termux-bootstrap.sh | sh
 ```
 
-That URL is commit `904e5c788660375104ebcedbf18003ea080754bf`, not the branch tip. SHA256 of the bootstrap file: `1932ef33b9e9da52f2ff4dbf7dd71b6bef1ffeb9df921550c1f08b423ea9335f`. A public GET of that URL returned 200 on 2026-11-06. Details are in `reports/2026-11-06-1tr-phone-relay.md`. This repository does not create a TinyURL or any other short link.
+That URL is commit `b575130ce49608f618a27ed97d60784dff0de37d`, not the branch tip. SHA256 of the bootstrap file: `4731dd5d7a392ddc3bdde9c596d2211ff9f676fdd93d0f274ae0f75880b0427a`. A public GET of that URL returned 200 on 2026-11-06. Stop the previous relay with Ctrl-C before running it. Details are in `reports/2026-11-06-1tr-phone-relay.md`. This repository does not create a TinyURL or any other short link.
 
 The script does not read stdin, so `curl | sh` is safe for the script itself. It installs `python` with Termux `pkg` (and `iproute2` when the mirror has it), downloads `phone_relay.py`, `client_template.sh` and `run-1tr-phone-relay.sh` from one pinned commit, refuses to start unless each SHA256 matches, and starts the relay. Payload files land in `~/.local/share/1tr-phone-relay` on the phone.
 
