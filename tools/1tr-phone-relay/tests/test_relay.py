@@ -522,8 +522,8 @@ class BootstrapTests(unittest.TestCase):
         lan = free_port()
         mcp = free_port()
         env = os.environ.copy()
-        for key in ("RELAY_ROOT", "RELAY_SESSION", "FORCE_TS_IP", "RELAY_POLL"):
-            env.pop(key, None)
+        for env_name in ("RELAY_ROOT", "RELAY_SESSION", "FORCE_TS_IP", "RELAY_POLL"):
+            env.pop(env_name, None)
         env.update({
             "HOME": str(home),
             "PATH": "%s%s%s" % (fakebin, os.pathsep, env.get("PATH", "")),
