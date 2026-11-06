@@ -78,8 +78,19 @@ case "$1" in
     esac
     ;;
   configure-boot)
-    if [ "${2:-}" = "--help" ]; then printf '%s\n' "--password"; exit 0; fi
+    if [ "${2:-}" = "--help" ]; then printf '%s\n' "configure-boot help"; exit 0; fi
     echo "$*" >> "$LOG/configure"
+    if [ ! -t 0 ]; then
+      printf '%s\n' "By setting a custom boot object, you will be putting your system into Permissive Security. Are you sure you want to do this? (enter y or n) aborting custom boot object installation."
+      exit 1
+    fi
+    printf '%s\n' "Are you sure you want to do this? (enter y or n)"
+    IFS= read -r ans || exit 1
+    [ "$ans" = y ] || { printf '%s\n' "aborting custom boot object installation."; exit 1; }
+    printf '%s\n' "kmutil username:"
+    IFS= read -r kmuser || exit 1
+    printf '%s\n' "kmutil password:"
+    IFS= read -r kmpass || exit 1
     printf '%s\n' "done."
     ;;
   *) exit 99 ;;
@@ -233,18 +244,82 @@ need "STOP declined"
 [ ! -s "$LOG/bputil" ] || fail "bputil after decline"
 echo "decline ok"
 
-# success reaches configure-boot and does not record the password
+# The Recovery fallback: stdin is not a terminal. A piped "y" still aborts.
+reset_logs
+set +e
+printf '%s\n' y | "$T/bin/kmutil" configure-boot -c x -v y > "$T/piped-y.txt" 2>&1
+pec=$?
+: | "$T/bin/kmutil" configure-boot -c x -v y > "$T/piped-eof.txt" 2>&1
+eec=$?
+set -e
+[ "$pec" != 0 ] && [ "$eec" != 0 ] || fail "non-tty kmutil should abort"
+grep -q 'aborting custom boot object installation.' "$T/piped-y.txt" || fail "piped y did not abort"
+grep -q 'aborting custom boot object installation.' "$T/piped-eof.txt" || fail "eof stdin did not abort"
+echo "nontty abort ok"
+
+# curl|sh: script stdin is exhausted; kmutil must be answered on the terminal.
 reset_logs; write_pins
 printf '%s\n' y morpheus s3cret-test > "$T/answers"
-set +e
-RECHAIN_ANSWERS=$T/answers dash "$SCRIPT" "$T/pins" >"$T/out" 2>"$T/err"; echo $? > "$T/ec"; set -e
-ec=$(cat "$T/ec"); STATUS=$RECHAIN_WORK/status.txt
+python3 - "$SCRIPT" "$T/pins" "$T/answers" "$RECHAIN_WORK" << 'PY'
+import fcntl, os, select, subprocess, sys, termios, time
+script, pins, answers, work = sys.argv[1:5]
+master, slave = os.openpty()
+env = os.environ.copy()
+env["RECHAIN_ANSWERS"] = answers
+env["RECHAIN_WORK"] = work
+def preexec():
+    os.setsid()
+    fcntl.ioctl(1, termios.TIOCSCTTY, 0)
+proc = subprocess.Popen(
+    ["dash", script, pins],
+    stdin=subprocess.DEVNULL,
+    stdout=slave,
+    stderr=slave,
+    close_fds=True,
+    preexec_fn=preexec,
+    env=env,
+)
+os.close(slave)
+buf = b""
+sent = set()
+deadline = time.time() + 8
+while time.time() < deadline:
+    r, _, _ = select.select([master], [], [], 0.2)
+    if r:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            break
+        buf += chunk
+        if b"(enter y or n)" in buf and "y" not in sent:
+            os.write(master, b"y\n"); sent.add("y")
+        if b"kmutil username:" in buf and "u" not in sent:
+            os.write(master, b"morpheus\n"); sent.add("u")
+        if b"kmutil password:" in buf and "p" not in sent:
+            os.write(master, b"s3cret-test\n"); sent.add("p")
+    if proc.poll() is not None:
+        break
+else:
+    proc.kill()
+    sys.stderr.buffer.write(buf)
+    sys.exit("timed out; sent %s" % ",".join(sorted(sent)))
+rc = proc.wait(timeout=5)
+os.close(master)
+sys.stderr.buffer.write(buf)
+sys.exit(rc)
+PY
+ec=$?
+STATUS=$RECHAIN_WORK/status.txt
 want 0
 need "RECHAIN_DONE"
-need "KCBZ 0"
+need "KMUTIL_EXIT 0"
 grep -q 'configure-boot -c' "$LOG/configure" || { echo "no configure"; cat "$LOG/kmutil"; exit 1; }
+grep -q -- '-p' "$LOG/configure" && fail "password passed on kmutil argv"
 grep -q s3cret-test "$STATUS" && fail "password in status"
 grep -q s3cret-test "$LOG/uploaded" && fail "password uploaded"
+grep -q s3cret-test "$RECHAIN_WORK/kmutil.txt" && fail "password in kmutil log"
 grep -q -- '--setBoot' "$LOG/bless" && fail "setBoot"
-echo "success ok"
+echo "tty configure ok"
 echo "rechain tests: all passed"

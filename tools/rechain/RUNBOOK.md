@@ -6,4 +6,4 @@ The installed `rover.macho` (`b7a557ff…`, 29,556,736 bytes) embeds `Linux vers
 
 `bchain.macho` (`1bcb9250…`, 4,259,840 bytes) is the stage1 whose config names this ESP and `aurora/stage2.bin`, and it chainloads from the ESP. The 19:47 report shows that file is `d4877ab1…`, 18,240,123 bytes. A trial `aurora/stage2-m4222.bin` (`82781366…`) is also present. This script does not select or modify the trial. Before `kmutil` it prints any `aura-try` marker (30 bytes or less) and waits for `y`.
 
-Pins and the short bootstrap are not in git. Not a hardware boot test.
+`kmutil configure-boot` is answered on the terminal (y, user, password). A `curl | sh` pipe is not used as its stdin. Pins and the short bootstrap are not in git. Not a hardware boot test.

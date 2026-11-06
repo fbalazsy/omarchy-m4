@@ -214,14 +214,28 @@ main() {
   bputil -d -v "$VGID" > "$W/policy.txt" 2>&1 || true
   if ! grep -qi "permissive" "$W/policy.txt"; then unset PW; die "boot policy is not Permissive; boot object not changed"; fi
   say "7 configure-boot"
-  if kmutil configure-boot --help 2>&1 | grep -q -- '--password'; then
-    printf 'y\n' | kmutil configure-boot -c "$W/loader.bin" -v "$vol" -u "$U" -p "$PW" > "$W/kmutil.txt" 2>&1 || true
-  else
-    kmutil configure-boot -c "$W/loader.bin" -v "$vol" > "$W/kmutil.txt" 2>&1 || true
-  fi
   unset PW
-  if grep -qi "error\|fail\|incorrect" "$W/kmutil.txt"; then die "kmutil failed; see the terminal log"; fi
-  if ! grep -qi "done" "$W/kmutil.txt"; then die "kmutil did not report done"; fi
+  # kmutil on this Recovery reads the permissive-security confirmation from stdin.
+  # curl|sh leaves stdin at EOF, and a pipe of "y" is not the terminal, so the
+  # prompt is answered on /dev/tty. stdout stays a copy of that terminal.
+  [ -r /dev/tty ] && [ -w /dev/tty ] || die "no terminal; run this from the Recovery Terminal"
+  rm -f "$W/kmutil.fifo"
+  mkfifo "$W/kmutil.fifo" || die "cannot make kmutil fifo"
+  tee "$W/kmutil.txt" < "$W/kmutil.fifo" > /dev/tty &
+  teepid=$!
+  kmutil configure-boot -c "$W/loader.bin" -v "$vol" < /dev/tty > "$W/kmutil.fifo" 2>&1
+  krc=$?
+  wait "$teepid" || true
+  rm -f "$W/kmutil.fifo"
+  say "KMUTIL_EXIT $krc"
+  if [ "$krc" != 0 ] || grep -qi 'abort' "$W/kmutil.txt"; then
+    excerpt=$(grep -i 'abort' "$W/kmutil.txt" 2>/dev/null | head -n 1 | cut -c 1-240)
+    [ -n "$excerpt" ] && say "KMUTIL_SAID $excerpt"
+    die "kmutil exited $krc"
+  fi
+  if ! grep -q 'done' "$W/kmutil.txt"; then
+    die "kmutil exited $krc without done"
+  fi
   bless --getBoot > "$W/bless.txt" 2>&1 || say "BLESS_GET_FAILED"
   say "RECHAIN_DONE loader=$got stage2=$sum"
   say "Restart from the Apple menu when you choose. This script does not reboot."
