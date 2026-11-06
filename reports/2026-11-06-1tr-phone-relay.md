@@ -6,23 +6,23 @@ Read-only Android Termux relay. The first phone run is described below from the 
 
 Use this pin, not the earlier bootstrap. Verified with an unauthenticated HTTPS GET (`HTTP 200`, no redirect) on 2026-11-06:
 
-- URL: `https://raw.githubusercontent.com/fbalazsy/omarchy-m4/b575130ce49608f618a27ed97d60784dff0de37d/tools/1tr-phone-relay/termux-bootstrap.sh`
-- Commit: `b575130ce49608f618a27ed97d60784dff0de37d`
-- SHA256: `4731dd5d7a392ddc3bdde9c596d2211ff9f676fdd93d0f274ae0f75880b0427a`
+- URL: `https://raw.githubusercontent.com/fbalazsy/omarchy-m4/102a39045d35b77af5f811af6a8323186180ff0b/tools/1tr-phone-relay/termux-bootstrap.sh`
+- Commit: `102a39045d35b77af5f811af6a8323186180ff0b`
+- SHA256: `628ed7d275354f91e1c8c9a95e98a8765f39b46e8438ad21ecd23333ddeb655d`
 
 The downloaded bytes match that commit. The shortest command is:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fbalazsy/omarchy-m4/b575130ce49608f618a27ed97d60784dff0de37d/tools/1tr-phone-relay/termux-bootstrap.sh|sh
+curl -fsSL https://raw.githubusercontent.com/fbalazsy/omarchy-m4/102a39045d35b77af5f811af6a8323186180ff0b/tools/1tr-phone-relay/termux-bootstrap.sh|sh
 ```
 
 No short link was created. A branch-tip raw URL is not the pin. Stop the previous relay with Ctrl-C first; the already-running process does not pick up this code.
 
-The bootstrap installs `python` with Termux `pkg`, installs `iproute2` when the mirror has it, and downloads the payload from commit `daf369b57b76c6aae8de60b6ba8828b18e29b257`. It does not start the relay unless these SHA256 values match:
+The bootstrap installs `python` with Termux `pkg`, installs `iproute2` when the mirror has it, and downloads the payload from commit `d9f45e812d94183ab08e9a284ae6b9c19481fe1c`. It does not start the relay unless these SHA256 values match:
 
 | File | SHA256 |
 |---|---|
-| `phone_relay.py` | `7c34d0216fe50581189f34bd7b14acd202513befa5198301f5dae0f9f48fd7d7` |
+| `phone_relay.py` | `4b6e020688d20af184d99c8bd744d2280162ded360dddebb7fb5d0bc869bad10` |
 | `client_template.sh` | `b8418744ca3bd319c920b877d8b659f7f20b887785a7f43241cbe4f35c1d821d` |
 | `run-1tr-phone-relay.sh` | `824717c7637dccabf53104677afa5ba2519fb219aa20b85e0c49a0e98dead2a2` |
 
@@ -44,7 +44,7 @@ Confidence: high that the blank card was netlink denial. Medium-high that ioctl 
 
 ## What was checked here
 
-`python3 -B tools/1tr-phone-relay/tests/test_relay.py` passed (16 tests). That run is local loopback only. It covers the allowlist, a denied `ip` command with ioctl still seeing loopback, rejection of an unassigned forced address, rejection of carrier NAT as if it were Tailscale, request-log redaction, a `Host` header that is not an IPv4 address, and a payload byte that does not match the pinned SHA256. The mismatched payload is not left in place and the relay is not started. `tools/privacy-check.py` is clean for this tree. No session token, disk inventory, key, or LAN address is in the commit. This was not re-run on the phone.
+`python3 -B tools/1tr-phone-relay/tests/test_relay.py` passed (17 tests). That run is local loopback only. It covers the allowlist, a denied `ip` command with ioctl still seeing loopback, rejection of an unassigned forced address, rejection of carrier NAT as if it were Tailscale, the MCP peer check (tailnet pair allowed, hotspot pair and mixed pair refused, loopback only from loopback), request-log redaction, a `Host` header that is not an IPv4 address, and a payload byte that does not match the pinned SHA256. The mismatched payload is not left in place and the relay is not started. `tools/privacy-check.py` is clean for this tree. No session token, disk inventory, key, or LAN address is in the commit. This was not re-run on the phone.
 
 ## Still manual
 
