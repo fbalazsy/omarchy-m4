@@ -536,10 +536,17 @@ wifi_setup() {
   fi
   rm -f "$(run_dir)/m4ssh.addr"
   got=0
-  while IFS= read -r _try nslot; do
+  # Default IFS splits "1 1". IFS= would leave nslot empty and skip the conf.
+  while IFS=' ' read -r _try nslot; do
+    case $nslot in
+      ''|*[!0-9]*) say "WIFI_SLOT_BAD"; continue ;;
+    esac
     conf="$rund/$nslot.conf"
     meta="$rund/$nslot.meta"
-    [ -f "$conf" ] || continue
+    if [ ! -f "$conf" ]; then
+      say "WIFI_SLOT_BAD"
+      continue
+    fi
     want=$(awk '$1=="iface"{print $2; exit}' "$meta" 2>/dev/null || true)
     if [ -n "$want" ] && [ "$want" != "$iface" ]; then
       say "WIFI_SKIP iface"
