@@ -28,7 +28,7 @@ le() {
   '
 }
 xx() {
-  xxd -s "$2" -l "$3" -p "$1" | tr -d " \n"
+  xxd -s "$2" -l "$3" -p "$1" 2>/dev/null | tr -d " \n" || true
 }
 magic4=$(xx "$f" 0 4)
 if [ "$(xx "$f" 0 2)" = "2321" ]; then

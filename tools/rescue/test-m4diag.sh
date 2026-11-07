@@ -63,15 +63,72 @@ exit 0
 EOF
 chmod 755 "$T/bin/ip"
 mkdir -p "$T/log"
-LOG=$T/log PATH="$T/bin:$PATH" interface=eth0 ip=192.0.2.10 subnet=24 router=192.0.2.1 \
-  M4_TELEMETRY_HOST=192.0.2.25 sh "$HERE/udhcpc-m4.sh" bound
+ln -s "$(command -v busybox)" "$T/bin/awk"
+run_dhcp() {
+  : > "$T/log/ip"
+  # shellcheck disable=SC2086
+  env LOG=$T/log PATH="$T/bin:$PATH" M4_TELEMETRY_HOST=192.0.2.25 "$@" \
+    sh "$HERE/udhcpc-m4.sh" bound
+}
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=24 router=192.0.2.1
 grep -q 'addr add 192.0.2.10/24 dev eth0' "$T/log/ip"
 grep -q 'route replace 192.0.2.25/32 via 192.0.2.1 dev eth0' "$T/log/ip"
 grep -q default "$T/log/ip" && exit 1
+# BusyBox 1.36.1: subnet is the dotted mask, mask is the prefix.
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=255.255.255.0 mask=24 router=192.0.2.1
+grep -q 'addr flush dev eth0' "$T/log/ip"
+grep -q 'addr add 192.0.2.10/24 dev eth0' "$T/log/ip"
+grep -q 'route replace 192.0.2.25/32 via 192.0.2.1 dev eth0' "$T/log/ip"
+grep -q default "$T/log/ip" && exit 1
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=255.255.255.0 router=192.0.2.1
+grep -q 'addr add 192.0.2.10/24 dev eth0' "$T/log/ip"
+# dotted mask only in $mask
+run_dhcp interface=eth0 ip=192.0.2.10 mask=255.255.255.128 router=192.0.2.1
+grep -q 'addr add 192.0.2.10/25 dev eth0' "$T/log/ip"
+reject_dhcp() {
+  : > "$T/log/ip"
+  if env LOG=$T/log PATH="$T/bin:$PATH" M4_TELEMETRY_HOST=192.0.2.25 \
+      "$@" sh "$HERE/udhcpc-m4.sh" bound; then
+    echo "dhcp should reject $*" >&2
+    exit 1
+  fi
+  [ ! -s "$T/log/ip" ]
+}
+reject_dhcp interface=eth0 ip=192.0.2.10 subnet=255.0.255.0 mask=24 router=192.0.2.1
+reject_dhcp interface=eth0 ip=192.0.2.10 subnet=255.255.255.0 mask=23 router=192.0.2.1
+reject_dhcp interface=eth0 ip=192.0.2.10 subnet=33 router=192.0.2.1
+reject_dhcp interface='eth0;ip' ip=192.0.2.10 subnet=24 router=192.0.2.1
 : > "$T/log/ip"
-LOG=$T/log PATH="$T/bin:$PATH" interface=eth0 ip=192.0.2.10 subnet=24 router=192.0.2.1 \
-  M4_TELEMETRY_HOST=192.0.2.25 sh "$HERE/udhcpc-m4.sh" deconfig
+env LOG=$T/log PATH="$T/bin:$PATH" interface=eth0 ip=192.0.2.10 subnet=255.255.255.0 mask=24 \
+  router=192.0.2.1 M4_TELEMETRY_HOST=192.0.2.25 sh "$HERE/udhcpc-m4.sh" deconfig
 [ ! -s "$T/log/ip" ]
+# same dotted-mask case under the embedded client's shell
+python3 - "$TRIAL" << 'PY'
+import pathlib, subprocess, sys
+b = pathlib.Path(sys.argv[1]).read_bytes()
+size_at, early = 4103735, 234816
+total = int.from_bytes(b[size_at:size_at+4], "little")
+mid = b[size_at+4+early:size_at+4+total]
+dec = subprocess.run(["zstd","-d","-c"], input=mid, capture_output=True).stdout
+j = 0
+bb = None
+while j+110 <= len(dec) and dec[j:j+6] == b"070701":
+    ns = int(dec[j+94:j+102], 16); fs = int(dec[j+54:j+62], 16)
+    name = dec[j+110:j+110+ns].split(b"\0", 1)[0].decode()
+    name_end = 110+ns
+    off = j+name_end+(4-(name_end%4))%4
+    blob = dec[off:off+fs]
+    if name == "usr/bin/busybox":
+        bb = blob
+    if name == "TRAILER!!!":
+        break
+    j = off+((fs+3)&~3)
+text = bb.decode("latin1", "replace")
+assert "udhcp 1.36.1" in text
+assert "mask=%u" in text
+assert "subnet\x00" in text
+print("embedded udhcpc 1.36.1")
+PY
 echo "udhcpc ok"
 
 # verify_root_init: shebang, missing interpreter, ELF with a missing library.
@@ -165,6 +222,96 @@ sh -c '
   child_ok -1 && exit 1
   child_ok 4321
 ' sh "$HERE/m4diag-lib.sh"
+# malformed ELF and a failing elf-interp must not kill the caller
+printf 'not-elf' > "$T/bad.elf"
+out=$(PATH="$T/bb:$PATH" busybox ash "$HERE/elf-interp.sh" "$T/bad.elf")
+printf '%s\n' "$out" | grep -qx 'KIND other'
+printf '\177ELF' > "$T/short.elf"
+out=$(PATH="$T/bb:$PATH" busybox ash "$HERE/elf-interp.sh" "$T/short.elf"; echo EXIT:$?)
+printf '%s\n' "$out" | grep -q '^EXIT:0$'
+cat > "$T/bin/elf-interp" << 'EOF'
+#!/bin/sh
+echo KIND other
+echo INTERP none
+exit 9
+EOF
+chmod 755 "$T/bin/elf-interp"
+mkdir -p "$T/root3/bin"
+printf 'x' > "$T/root3/bin/bash"
+out=$(LOG=$T/verify.log M4_RUN=$T/run PATH="$T/bin:$PATH" sh -c '
+  set -eu
+  . "$1"
+  report_extra "$2"
+  echo STILL-ALIVE
+' sh "$HERE/m4diag-lib.sh" "$T/root3")
+printf '%s\n' "$out" | grep -q 'elf-interp-failed'
+printf '%s\n' "$out" | grep -qx 'STILL-ALIVE'
+# switch_root returning must leave the shell alive, remount ro, and not run another init
+cat > "$T/bin/mount" << 'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$MOCK_MOUNT"
+case " $* " in
+  *" --move "*) exit "${MOCK_MOVE_RC:-0}" ;;
+  *" -o move "*) exit "${MOCK_MOVE_RC:-0}" ;;
+  *" remount,ro "*) exit 0 ;;
+esac
+exit 0
+EOF
+chmod 755 "$T/bin/mount"
+cat > "$T/bin/exec-init" << 'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$MOCK_EXEC"
+exit 7
+EOF
+chmod 755 "$T/bin/exec-init"
+: > "$T/mount.log"
+: > "$T/exec.log"
+mkdir -p "$T/sys/dev" "$T/sys/proc" "$T/sys/sys" "$T/sys/run"
+out=$(LOG=$T/verify.log M4_RUN=$T/run M4_SYSROOT=$T/sys PATH="$T/bin:$PATH" \
+  MOCK_MOUNT=$T/mount.log MOCK_EXEC=$T/exec.log M4_EXEC_INIT=$T/bin/exec-init \
+  sh -c '
+    set -eu
+    . "$1"
+    if handoff_root /usr/local/sbin/rover-init; then echo BAD-SUCCESS; exit 1; fi
+    echo STILL-ALIVE
+  ' sh "$HERE/m4diag-lib.sh")
+printf '%s\n' "$out" | grep -q 'SWITCH_ROOT_FAIL exec /usr/local/sbin/rover-init rc=7'
+printf '%s\n' "$out" | grep -q 'MOUNT ro-after-switch-fail'
+printf '%s\n' "$out" | grep -qx 'STILL-ALIVE'
+grep -q '/usr/local/sbin/rover-init' "$T/exec.log"
+grep -q '/sbin/init' "$T/exec.log" && exit 1
+grep -q 'remount,ro' "$T/mount.log"
+# move failure never execs the init
+: > "$T/mount.log"
+: > "$T/exec.log"
+out=$(LOG=$T/verify.log M4_RUN=$T/run M4_SYSROOT=$T/sys PATH="$T/bin:$PATH" \
+  MOCK_MOUNT=$T/mount.log MOCK_EXEC=$T/exec.log MOCK_MOVE_RC=1 M4_EXEC_INIT=$T/bin/exec-init \
+  sh -c '
+    set -eu
+    . "$1"
+    if handoff_root /usr/local/sbin/rover-init; then echo BAD-SUCCESS; exit 1; fi
+    echo STILL-ALIVE
+  ' sh "$HERE/m4diag-lib.sh")
+printf '%s\n' "$out" | grep -q 'SWITCH_ROOT_FAIL move'
+printf '%s\n' "$out" | grep -qx 'STILL-ALIVE'
+[ ! -s "$T/exec.log" ]
+# script text is reported and not executed
+cat > "$T/bin/elf-interp" << EOF
+#!/bin/sh
+exec busybox ash "$HERE/elf-interp.sh" "\$@"
+EOF
+chmod 755 "$T/bin/elf-interp"
+printf '%s\n' '#!/bin/bash' 'exec /lib/systemd/systemd' > "$T/root/usr/local/sbin/rover-init"
+chmod 755 "$T/root/usr/local/sbin/rover-init"
+printf '%s\n' 'interpreter' > "$T/root/bin/bash"
+chmod 755 "$T/root/bin/bash"
+: > "$T/chroot.log"
+out=$(verify 0 "" /usr/local/sbin/rover-init)
+printf '%s\n' "$out" | grep -q 'SCRIPT_DECL'
+printf '%s\n' "$out" | grep -q 'exec /lib/systemd/systemd'
+printf '%s\n' "$out" | grep -q 'syntax-only'
+grep -q -- '-n usr/local/sbin/rover-init' "$T/chroot.log"
+grep -q 'systemd' "$T/chroot.log" && exit 1
 echo "verify ok"
 
 # The source tree carries neither the root identity nor a LAN address.

@@ -277,6 +277,7 @@ def main():
             "not-a-root-filesystem-repair",
             "no-sbin-init-substitute",
             "root-rw-only-after-verify",
+            "script-syntax-only not-a-full-userspace-check",
         ])) + "\n"
         files["etc/m4diag-limits"] = (0o100644, limit_text.encode())
         have = {name for name, _, _ in items}
