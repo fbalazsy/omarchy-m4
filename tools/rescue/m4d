@@ -1,0 +1,8 @@
+#!/bin/sh
+# 1TR bootstrap for the diagnostic handoff Mach-O.
+# Set H to the recovery server. Does not reboot. Does not write the ESP.
+set -eu
+H=${H:?set H to the recovery server}
+curl -fsS --max-time 60 -o /tmp/enroll-v2 "$H/enroll-v2"
+curl -fsS --max-time 30 -o /tmp/m4diag.pins "$H/m4diag.pins"
+exec sh /tmp/enroll-v2 /tmp/m4diag.pins

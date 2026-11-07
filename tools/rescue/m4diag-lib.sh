@@ -19,10 +19,21 @@ uptime_s() {
   cut -d. -f1 /proc/uptime 2>/dev/null || echo 0
 }
 
+child_ok() {
+  case ${1:-} in
+    ''|0|1|-1) return 1 ;;
+  esac
+  return 0
+}
+
 load_one() {
   name=$1
   modprobe "$name" >"$(run_dir)/mp-$name.err" 2>&1 &
   p=$!
+  if ! child_ok "$p"; then
+    say "MODPROBE $name no-child"
+    return 0
+  fi
   i=0
   while [ "$i" -lt 5 ]; do
     if ! kill -0 "$p" 2>/dev/null; then
@@ -32,7 +43,9 @@ load_one() {
     i=$((i + 1))
   done
   if kill -0 "$p" 2>/dev/null; then
-    kill "$p" 2>/dev/null || true
+    if child_ok "$p"; then
+      kill "$p" 2>/dev/null || true
+    fi
     set +e
     wait "$p"
     set -e
@@ -44,6 +57,7 @@ load_one() {
   rc=$?
   set -e
   say "MODPROBE $name $rc"
+  return 0
 }
 
 load_list() {
@@ -160,6 +174,53 @@ net_setup() {
     fi
   done
   [ "$used" -eq 0 ] && say "NET_DRIVER_NONE"
+  return 0
+}
+
+norm_abs() {
+  printf '%s\n' "$1" | awk -F/ '{
+    n = 0
+    for (i = 1; i <= NF; i++) {
+      if ($i == "" || $i == ".") continue
+      if ($i == "..") { if (n > 0) n--; continue }
+      s[++n] = $i
+    }
+    out = ""
+    for (i = 1; i <= n; i++) out = out "/" s[i]
+    if (out == "") out = "/"
+    printf "%s\n", out
+  }'
+}
+
+# Print the absolute path inside the target root. Absolute symlinks are
+# re-rooted there; they are not opened on the initramfs host.
+resolve_under() {
+  root=$1
+  path=$2
+  depth=0
+  while [ "$depth" -lt 8 ]; do
+    path=$(norm_abs "$path")
+    full=$root$path
+    if [ -L "$full" ]; then
+      link=$(readlink "$full") || return 1
+      case $link in
+        /*) path=$link ;;
+        *)
+          dir=${path%/*}
+          [ -n "$dir" ] || dir=/
+          path=$dir/$link
+          ;;
+      esac
+      depth=$((depth + 1))
+      continue
+    fi
+    if [ -e "$full" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+    return 1
+  done
+  return 1
 }
 
 field() {
@@ -171,31 +232,43 @@ field() {
 verify_root_init() {
   root=$1
   rel=$2
+  case $rel in
+    /*) ;;
+    *) say "VERIFY $rel not-absolute"; return 1 ;;
+  esac
   full=$root$rel
   if [ ! -e "$full" ] && [ ! -L "$full" ]; then
     say "VERIFY $rel absent"
     return 1
   fi
-  resolved=$(readlink -f "$full" 2>/dev/null || printf '%s\n' "$full")
+  if ! resolved=$(resolve_under "$root" "$rel"); then
+    say "VERIFY $rel resolve-failed"
+    return 1
+  fi
   say "STAT $rel $(stat -c '%F %a' "$full" 2>/dev/null || echo unstatable)"
+  say "RESOLVED $rel $resolved"
   info=$(run_dir)/m4diag-file.txt
-  elf-interp "$resolved" > "$info"
+  elf-interp "$root$resolved" > "$info"
   kind=$(field KIND "$info")
   interp=$(field INTERP "$info")
   say "FILE $rel kind=$kind interp=${interp:-none}"
   case $kind in
     script)
       [ -n "${interp:-}" ] && [ "$interp" != "none" ] || { say "VERIFY $rel no-shebang"; return 1; }
-      ipath=$root$interp
-      if [ ! -e "$ipath" ] && [ ! -L "$ipath" ]; then
+      case $interp in
+        /*) ;;
+        *) say "VERIFY $rel interpreter-not-absolute $interp"; return 1 ;;
+      esac
+      if ! ipath=$(resolve_under "$root" "$interp"); then
         say "VERIFY $rel interpreter-absent $interp"
         return 1
       fi
-      if [ ! -x "$ipath" ]; then
+      if [ ! -x "$root$ipath" ]; then
         say "VERIFY $rel interpreter-not-executable $interp"
         return 1
       fi
-      base=${interp##*/}
+      say "INTERP_FILE $rel $ipath"
+      base=${ipath##*/}
       case $base in
         bash|sh|ash)
           set +e
@@ -203,11 +276,14 @@ verify_root_init() {
           rc=$?
           set -e
           say "VERIFY $rel script $interp rc=$rc"
-          return "$rc"
+          if [ "$rc" -eq 0 ]; then
+            return 0
+          fi
+          return 1
           ;;
         *)
-          say "VERIFY $rel script $interp exec-bit-only"
-          return 0
+          say "VERIFY $rel script $interp not-a-shell"
+          return 1
           ;;
       esac
       ;;
@@ -216,15 +292,19 @@ verify_root_init() {
         say "VERIFY $rel interp-unreadable"
         return 1
       }
-      ipath=$root$interp
-      if [ ! -e "$ipath" ] && [ ! -L "$ipath" ]; then
+      case $interp in
+        /*) ;;
+        *) say "VERIFY $rel interpreter-not-absolute $interp"; return 1 ;;
+      esac
+      if ! ipath=$(resolve_under "$root" "$interp"); then
         say "VERIFY $rel interpreter-absent $interp"
         return 1
       fi
-      if [ ! -x "$ipath" ]; then
+      if [ ! -x "$root$ipath" ]; then
         say "VERIFY $rel interpreter-not-executable $interp"
         return 1
       fi
+      say "INTERP_FILE $rel $ipath"
       set +e
       chroot "$root" "$interp" --list "${rel#/}" > "$(run_dir)/m4diag-verify.txt" 2>&1
       rc=$?
@@ -233,11 +313,12 @@ verify_root_init() {
         say "VERIFY $rel elf $interp missing-lib rc=$rc"
         return 1
       fi
-      say "VERIFY $rel elf $interp rc=$rc"
-      if [ "$rc" -eq 0 ]; then
-        return 0
+      if [ "$rc" -ne 0 ]; then
+        say "VERIFY $rel elf $interp rc=$rc"
+        return 1
       fi
-      return 1
+      say "VERIFY $rel elf $interp rc=$rc"
+      return 0
       ;;
     *)
       say "VERIFY $rel not-executable-kind $kind"
@@ -254,29 +335,53 @@ report_extra() {
       say "EXTRA $rel absent"
       continue
     fi
-    resolved=$(readlink -f "$full" 2>/dev/null || printf '%s\n' "$full")
-    elf-interp "$resolved" > "$(run_dir)/m4diag-extra.txt"
-    say "EXTRA $rel $(tr '\n' ' ' < "$(run_dir)/m4diag-extra.txt")"
+    if ! resolved=$(resolve_under "$root" "$rel"); then
+      say "EXTRA $rel resolve-failed"
+      continue
+    fi
+    elf-interp "$root$resolved" > "$(run_dir)/m4diag-extra.txt"
+    say "EXTRA $rel $resolved $(tr '\n' ' ' < "$(run_dir)/m4diag-extra.txt")"
   done
 }
 
-post_log() {
+post_named() {
+  name=$1
+  body=$2
+  case $name in
+    m4diag-start.txt|m4diag-checks.txt|m4diag-handoff.txt) ;;
+    *) say "NET_EXPORT rejected $name"; return 0 ;;
+  esac
   parse_url
-  if [ -z "${M4_HOST:-}" ]; then
-    say "NET_EXPORT skipped"
+  if [ -z "${M4_HOST:-}" ] || [ -z "${M4_PORT:-}" ]; then
+    say "NET_EXPORT $name skipped"
     return 0
   fi
-  len=$(wc -c < "$LOG" | tr -d ' ')
-  set +e
-  {
-    printf 'PUT %s HTTP/1.0\r\nHost: %s\r\nContent-Type: text/plain\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' \
-      "$M4_PATH" "$M4_HOST" "$len"
-    cat "$LOG"
-  } | nc -w 5 "$M4_HOST" "$M4_PORT" > "$(run_dir)/m4diag.http" 2>"$(run_dir)/m4diag.nc"
-  rc=$?
-  set -e
-  status=$(head -n 1 "$(run_dir)/m4diag.http" 2>/dev/null || true)
-  say "NET_EXPORT $rc ${status:-none}"
+  case $M4_PATH in
+    /up) ;;
+    *) say "NET_EXPORT $name bad-path"; return 0 ;;
+  esac
+  len=$(wc -c < "$body" | tr -d ' ')
+  attempt=0
+  while [ "$attempt" -lt 2 ]; do
+    attempt=$((attempt + 1))
+    set +e
+    {
+      printf 'PUT /up/%s HTTP/1.0\r\nHost: %s\r\nContent-Type: text/plain\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' \
+        "$name" "$M4_HOST" "$len"
+      cat "$body"
+    } | nc -w 5 "$M4_HOST" "$M4_PORT" > "$(run_dir)/m4diag.http" 2>"$(run_dir)/m4diag.nc"
+    rc=$?
+    set -e
+    status=$(head -n 1 "$(run_dir)/m4diag.http" 2>/dev/null || true)
+    case $status in
+      'HTTP/1.0 2'*|'HTTP/1.1 2'*)
+        say "NET_EXPORT $name ok attempt=$attempt $status"
+        return 0
+        ;;
+    esac
+    say "NET_EXPORT $name fail attempt=$attempt rc=$rc ${status:-none}"
+  done
+  return 0
 }
 
 mount_ro() {
@@ -334,8 +439,12 @@ m4diag_main() {
   if [ ! -e "/lib/modules/$rel/modules.dep" ]; then
     say "MODULES_DEP_ABSENT $rel"
   fi
-  load_list early 30
-  net_setup
+  if [ -f /usr/lib/firmware/apple/tpmtfw-j616s.bin ]; then
+    say "FIRMWARE packed apple/tpmtfw-j616s.bin"
+  else
+    say "FIRMWARE packed-file-absent"
+  fi
+  cp "$LOG" "$(run_dir)/m4diag-start.body"
   load_list nvme 15
   initarg=/sbin/init
   rootarg=
@@ -346,21 +455,31 @@ m4diag_main() {
     esac
   done
   say "INIT_ARG $initarg"
-  if [ -z "$rootarg" ] || ! mount_ro "$rootarg"; then
-    say "CLASS diagnostic-hold"
-    post_log || true
-    say "HOLD root was not mounted. configured init was not started"
-    exec /usr/bin/ash
+  verified=0
+  if [ -n "$rootarg" ] && mount_ro "$rootarg"; then
+    report_extra /sysroot
+    if verify_root_init /sysroot "$initarg"; then
+      verified=1
+    fi
+  else
+    say "VERIFY mount-failed"
   fi
-  report_extra /sysroot
-  if verify_root_init /sysroot "$initarg" && remount_rw; then
+  load_list early 30
+  set +e
+  net_setup
+  set -e
+  post_named m4diag-start.txt "$(run_dir)/m4diag-start.body"
+  cp "$LOG" "$(run_dir)/m4diag-checks.body"
+  post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body"
+  if [ "$verified" -eq 1 ] && remount_rw; then
     say "CLASS handoff"
-    post_log || true
+    cp "$LOG" "$(run_dir)/m4diag-handoff.body"
+    post_named m4diag-handoff.txt "$(run_dir)/m4diag-handoff.body"
     exec /usr/bin/switch_root /sysroot "$initarg"
     say "SWITCH_ROOT_RETURNED"
   fi
   say "CLASS diagnostic-hold"
-  post_log || true
   say "HOLD configured init was not started"
+  say "ROOT_STAYS ro,noload"
   exec /usr/bin/ash
 }

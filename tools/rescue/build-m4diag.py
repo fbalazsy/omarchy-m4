@@ -71,15 +71,20 @@ def pack_cpio(items):
     return bytes(out)
 
 
+FW_SHA = "7eb84312cb4ea74833ce9567ba8c92bc42a0c26c5c34d6bdfaa5cb65abfe4b26"
+FW_SIZE = 81424
+FW_CPIO = "usr/lib/firmware/apple/tpmtfw-j616s.bin"
+
+
 def check_url(url):
     if url == "":
         return
-    if not url.startswith("http://") or "@" in url:
-        raise SystemExit("telemetry url must be http:// without credentials")
+    if not url.startswith("http://") or "@" in url or url.endswith("/"):
+        raise SystemExit("telemetry url must be http://host:port/up without credentials")
     rest = url[len("http://"):]
     hostport, slash, path = rest.partition("/")
-    if slash != "/" or not path.startswith("up/"):
-        raise SystemExit("telemetry path must be /up/...")
+    if slash != "/" or path != "up":
+        raise SystemExit("telemetry path must be /up")
     host, sep, port = hostport.partition(":")
     parts = host.split(".")
     if len(parts) != 4 or any((not p.isdigit()) or int(p) > 255 for p in parts):
@@ -200,10 +205,10 @@ def build_modules(tar_xz, work):
             raise SystemExit("vermagic mismatch %s" % mod)
         for hit in strings_with(blob.stdout, b"firmware="):
             value = hit.split("=", 1)[1]
-            if "*" in value or "?" in value:
-                limits.append("firmware-wildcard %s absent-from-module-archive" % value)
+            if value == "apple/tpmtfw-*.bin":
+                limits.append("module-firmware-glob apple/tpmtfw-*.bin")
             else:
-                raise SystemExit("concrete firmware %s is not in the module archive" % value)
+                raise SystemExit("unhandled firmware request %s" % value)
         dest = rel / mod
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src / mod, dest)
@@ -222,8 +227,12 @@ def main():
     parser.add_argument("modules")
     parser.add_argument("out")
     parser.add_argument("--telemetry-url", default="")
+    parser.add_argument("--firmware", required=True)
     args = parser.parse_args()
     check_url(args.telemetry_url)
+    firmware = pathlib.Path(args.firmware).read_bytes()
+    if len(firmware) != FW_SIZE or hashlib.sha256(firmware).hexdigest() != FW_SHA:
+        raise SystemExit("firmware is not tpmtfw-j616s.bin")
     src = pathlib.Path(args.stage2).read_bytes()
     if hashlib.sha256(src).hexdigest() != WANT or len(src) != 18239729:
         raise SystemExit("input is not the trial stage2")
@@ -257,11 +266,17 @@ def main():
         files["etc/m4diag-url"] = (0o100644, (args.telemetry_url + "\n").encode())
         files["etc/m4diag-host"] = (0o100644, b"")
         files["etc/m4diag-modules"] = (0o100644, ("".join(n + "\n" for n in names)).encode())
+        files[FW_CPIO] = (0o100644, firmware)
         limit_text = "\n".join(dict.fromkeys(limits + [
+            "trackpad-firmware apple/tpmtfw-j616s.bin packed",
+            "keyboard-node has no firmware-name",
+            "input-not-proven-on-hardware",
             "no-gadget",
             "no-fsck",
             "handoff-only-if-configured-init-verifies",
             "not-a-root-filesystem-repair",
+            "no-sbin-init-substitute",
+            "root-rw-only-after-verify",
         ])) + "\n"
         files["etc/m4diag-limits"] = (0o100644, limit_text.encode())
         have = {name for name, _, _ in items}

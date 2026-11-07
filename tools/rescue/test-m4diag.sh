@@ -132,6 +132,39 @@ printf '%s\n' "$out" | grep -q 'missing-lib'
 grep -q -- '--list usr/local/sbin/rover-init' "$T/chroot.log"
 out=$(verify 0 "" /usr/local/sbin/rover-init)
 printf '%s\n' "$out" | grep -qx 'DECISION handoff'
+# Absolute symlink must stay inside the target root, not the host's /usr/bin/bash.
+mkdir -p "$T/root2/usr/bin" "$T/root2/bin" "$T/root2/usr/local/sbin"
+printf '%s\n' 'INSIDE-ROOT' > "$T/root2/usr/bin/bash"
+chmod 755 "$T/root2/usr/bin/bash"
+ln -s /usr/bin/bash "$T/root2/bin/bash"
+printf '%s\n' '#!/bin/bash' 'echo not-run' > "$T/root2/usr/local/sbin/rover-init"
+chmod 755 "$T/root2/usr/local/sbin/rover-init"
+: > "$T/chroot.log"
+out=$(MOCK_RC=0 MOCK_OUT= MOCK_LOG=$T/chroot.log LOG=$T/verify.log M4_RUN=$T/run PATH="$T/bin:$PATH" \
+  sh -c '
+    set -eu
+    . "$1"
+    if verify_root_init "$2" /usr/local/sbin/rover-init; then echo DECISION handoff; else echo DECISION hold; fi
+  ' sh "$HERE/m4diag-lib.sh" "$T/root2")
+printf '%s\n' "$out" | grep -qx 'DECISION handoff'
+printf '%s\n' "$out" | grep -q 'INTERP_FILE /usr/local/sbin/rover-init /usr/bin/bash'
+printf '%s\n' "$out" | grep -q 'RESOLVED /usr/local/sbin/rover-init /usr/local/sbin/rover-init'
+# The opened interpreter is the file inside the fixture. Host bash is an ELF.
+python3 - "$T/root2/usr/bin/bash" << 'PY'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+assert text.startswith("INSIDE-ROOT")
+PY
+grep -q '/bin/bash -n usr/local/sbin/rover-init' "$T/chroot.log"
+sh -c '
+  set -eu
+  . "$1"
+  child_ok 1 && exit 1
+  child_ok 0 && exit 1
+  child_ok "" && exit 1
+  child_ok -1 && exit 1
+  child_ok 4321
+' sh "$HERE/m4diag-lib.sh"
 echo "verify ok"
 
 # The source tree carries neither the root identity nor a LAN address.
@@ -160,9 +193,16 @@ grep -q 'cdc_ether|cdc_ncm|r8153_ecm' "$HERE/m4diag-lib.sh"
 echo "static ok"
 
 python3 "$HERE/build-m4diag.py" "$TRIAL" "$MODULES" "$T/m4diag.bin" \
-  --telemetry-url 'http://192.0.2.25:8616/up/m4diag.txt' > "$T/build.out"
+  --firmware /tmp/fwm4/usr/lib/firmware/apple/tpmtfw-j616s.bin \
+  --telemetry-url 'http://192.0.2.25:8616/up' > "$T/build.out"
 cat "$T/build.out"
-grep -q 'LIMIT firmware-wildcard apple/tpmtfw-\*.bin absent-from-module-archive' "$T/build.out"
+grep -q 'LIMIT module-firmware-glob apple/tpmtfw-\*.bin' "$T/build.out"
+grep -q 'readlink -f' "$HERE/m4diag-lib.sh" && exit 1
+grep -q 'm4diag-start.txt' "$HERE/m4diag-lib.sh"
+grep -q 'm4diag-checks.txt' "$HERE/m4diag-lib.sh"
+grep -q 'm4diag-handoff.txt' "$HERE/m4diag-lib.sh"
+grep -q 'route add default' "$HERE/udhcpc-m4.sh" && exit 1
+grep -q '0.0.0.0/0' "$HERE/udhcpc-m4.sh" && exit 1
 python3 - "$T/m4diag.bin" "$T/rootfs" << 'PY'
 import gzip, io, os, pathlib, shutil, struct, subprocess, sys
 image, rootfs = sys.argv[1:]
@@ -238,7 +278,10 @@ assert "switch_root" not in init  # the decision lives in the library
 lib = (root / "usr/bin/m4diag-lib.sh").read_text()
 assert "ro,noload" in lib and "fsck" not in lib
 url = (root / "etc/m4diag-url").read_text().strip()
-assert url == "http://192.0.2.25:8616/up/m4diag.txt"
+assert url == "http://192.0.2.25:8616/up"
+fw = (root / "usr/lib/firmware/apple/tpmtfw-j616s.bin").read_bytes()
+assert len(fw) == 81424
+assert __import__("hashlib").sha256(fw).hexdigest() == "7eb84312cb4ea74833ce9567ba8c92bc42a0c26c5c34d6bdfaa5cb65abfe4b26"
 mods = (root / "etc/m4diag-modules").read_text().split()
 assert mods.index("spi-apple") < mods.index("nvme-apple")
 assert mods.index("usbcore") < mods.index("r8153_ecm")
