@@ -136,6 +136,17 @@ def main():
         raise SystemExit("lib still contains the shell mount-move handoff")
     if "resolve_under" not in lib:
         raise SystemExit("in-root symlink resolver missing")
+    if "etc/m4diag-ssh" in found:
+        if found["etc/m4diag-ssh"].strip() != b"ro-hold":
+            raise SystemExit("ssh mode is not ro-hold")
+        if b"USB_GADGET_UNSUPPORTED" not in lib.encode():
+            raise SystemExit("gadget refusal is not logged")
+        key = found["etc/m4diag-authorized_keys"]
+        if b"PRIVATE KEY" in key or key.count(b"\n") > 1:
+            raise SystemExit("authorized keys file is not one public line")
+        if not found.get("usr/sbin/dropbearmulti", b"").startswith(b"\x7fELF"):
+            raise SystemExit("dropbear missing")
+        print("SSH_HOLD ro-hold")
     line = suffix.split(b"\n", 1)[0]
     if b"init=/usr/local/sbin/rover-init" not in line or b"noresume" not in line:
         raise SystemExit("bootargs init/noresume missing")
