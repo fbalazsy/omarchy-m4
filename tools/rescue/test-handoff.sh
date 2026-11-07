@@ -100,6 +100,8 @@ cp -a "$T/sys/usr/lib/libc.so.6" "$NR/usr/lib/"
 cp -a "$T/sys/usr/lib/libcrypt.so.2.0.0" "$NR/usr/lib/"
 ln -sfn libcrypt.so.2.0.0 "$NR/usr/lib/libcrypt.so.2"
 printf '%s\n' SENTINEL > "$NR/MARK"
+mkdir -p "$NR/run" "$NR/tmp"
+printf '%s\n' NEW-RUN > "$NR/run/from-new-root"
 cat > "$NR/init" << 'EOF'
 #!/bin/sh
 {
@@ -113,15 +115,29 @@ cat > "$NR/init" << 'EOF'
   if [ -d /dev ]; then printf 'DEV yes\n'; else printf 'DEV no\n'; fi
   if [ -c /dev/console ]; then printf 'CONSOLE char\n'; else printf 'CONSOLE no\n'; fi
   if [ -x /bin/busybox ]; then printf 'BUSYBOX packed\n'; else printf 'BUSYBOX missing\n'; fi
+  runmount=no
   while read -r src mnt fst rest; do
     case $mnt in
       /proc) printf 'MOUNTPROC %s %s\n' "$src" "$fst" ;;
       /sys) printf 'MOUNTSYS %s %s\n' "$src" "$fst" ;;
       /dev) printf 'MOUNTDEV %s %s\n' "$src" "$fst" ;;
+      /run) runmount=yes; printf 'MOUNTRUN %s %s\n' "$src" "$fst" ;;
     esac
   done < /proc/mounts
-  tr '\0' ' ' < /proc/1/cmdline
-  printf '\nARGV %s\n' "$0"
+  printf 'RUNMOUNT %s\n' "$runmount"
+  if [ -f /run/from-new-root ]; then
+    read -r runfile < /run/from-new-root
+    printf 'RUNFILE %s\n' "$runfile"
+  else
+    printf 'RUNFILE missing\n'
+  fi
+  if [ -e /run/from-old-root ]; then printf 'RUNLEAK yes\n'; else printf 'RUNLEAK no\n'; fi
+  printf 'MOUNTS-BEGIN\n'
+  while read -r line; do
+    printf '%s\n' "$line"
+  done < /proc/mounts
+  printf 'MOUNTS-END\n'
+  printf 'ARGV %s\n' "$0"
 } > /proof/result
 exit 0
 EOF
@@ -142,13 +158,39 @@ cp -a "$T/sys/usr/lib/libcrypt.so.2.0.0" /usr/lib/libcrypt.so.2.0.0
 ln -sfn libcrypt.so.2.0.0 /usr/lib/libcrypt.so.2
 cp -a "$T/sys/usr/lib/ld-linux-aarch64.so.1" /usr/lib/ld-linux-aarch64.so.1
 mount --bind "$NR" "$NR"
-mount --bind "$PROOF" "$NR/proof"
-exec "$T/sys/usr/bin/switch_root" "$NR" /init
+{
+  echo "packed busybox ash, failed exec"
+  set +e
+  "$T/sys/usr/bin/busybox" ash -c 'set +e; exec /no/such/switch_root; echo SURVIVED'
+  echo ASH_RC:$?
+  set -e
+} > "$PROOF/ash-exec.txt" 2>&1
+# The packed switch_root refuses a non-ramfs root. Build a tmpfs initramfs,
+# the same shape as the boot: proc, sys and dev are mounts, /run is not.
+IR=/tmp/ir-m4
+mkdir -p "\$IR"
+mount -t tmpfs tmpfs "\$IR"
+mkdir -p "\$IR/bin" "\$IR/lib" "\$IR/usr/bin" "\$IR/usr/lib" "\$IR/proc" "\$IR/sys" "\$IR/dev" "\$IR/run" "\$IR/newroot"
+cp -a "$T/sys/usr/bin/switch_root" "\$IR/usr/bin/switch_root"
+cp -a "$T/sys/usr/lib/ld-linux-aarch64.so.1" "\$IR/lib/ld-linux-aarch64.so.1"
+cp -a "$T/sys/usr/lib/ld-linux-aarch64.so.1" "\$IR/usr/lib/ld-linux-aarch64.so.1"
+cp -a "$T/sys/usr/lib/libc.so.6" "\$IR/usr/lib/libc.so.6"
+cp -a "$T/sys/usr/lib/libcrypt.so.2.0.0" "\$IR/usr/lib/libcrypt.so.2.0.0"
+ln -sfn libcrypt.so.2.0.0 "\$IR/usr/lib/libcrypt.so.2"
+mount --bind /proc "\$IR/proc"
+mount --bind /sys "\$IR/sys"
+mount --bind /dev "\$IR/dev"
+printf '%s\n' OLD-RUN > "\$IR/run/from-old-root"
+mount --bind "$NR" "\$IR/newroot"
+echo 'RUN_BEFORE not-mount' > "$PROOF/console.txt"
+mountpoint -q "\$IR/run" && echo 'unexpected run mount' >> "$PROOF/console.txt"
+exec chroot "\$IR" /usr/bin/switch_root /newroot /init
 EOF
 chmod 755 "$INNER"
 set +e
 sudo unshare --mount --pid --fork --mount-proc --propagation private "$INNER" > "$T/unshare.out" 2>&1
 rc=$?
+cp "$T/unshare.out" /tmp/m4-unshare.txt 2>/dev/null || true
 set -e
 rm -f /tmp/NOT-THE-NEW-ROOT
 if [ "$rc" -ne 0 ]; then
@@ -156,9 +198,16 @@ if [ "$rc" -ne 0 ]; then
   cat "$T/unshare.out" >&2
   exit 1
 fi
-result=$PROOF/result
+result=$NR/proof/result
 [ -f "$result" ] || { echo "no proof file" >&2; cat "$T/unshare.out" >&2; exit 1; }
+echo "----- switch_root console -----"
+cat "$T/unshare.out"
+echo "----- proof -----"
 cat "$result"
+echo "----- ash exec -----"
+cat "$PROOF/ash-exec.txt"
+echo "----- before -----"
+cat "$PROOF/console.txt"
 grep -qx 'PID 1' "$result"
 grep -qx 'MARK SENTINEL' "$result"
 grep -qx 'LEAK no' "$result"
@@ -171,4 +220,10 @@ grep -qx 'MOUNTPROC proc proc' "$result"
 grep -qx 'MOUNTSYS sysfs sysfs' "$result"
 grep -qx 'MOUNTDEV devtmpfs devtmpfs' "$result"
 grep -qx 'ARGV /init' "$result"
+grep -qx 'RUN_BEFORE not-mount' "$PROOF/console.txt"
+grep -qx 'RUNMOUNT no' "$result"
+grep -qx 'RUNFILE NEW-RUN' "$result"
+grep -qx 'RUNLEAK no' "$result"
+grep -q 'SURVIVED' "$PROOF/ash-exec.txt" && { echo "ash continued after failed exec" >&2; exit 1; }
+grep -q 'not found' "$PROOF/ash-exec.txt"
 echo "handoff proof ok"

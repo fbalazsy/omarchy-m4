@@ -150,8 +150,12 @@ def main():
         if ssh_mode == b"ro-hold":
             print("SSH_HOLD ro-hold")
         else:
-            if "FALLBACK_WIFI pre-exec-only" not in lib or "no fallback after this exec" not in lib:
+            if "FALLBACK_WIFI pre-exec-only" not in lib or "no fallback after a successful exec" not in lib:
                 raise SystemExit("boot mode does not keep the pre-exec fallback")
+            if "ROOT_STAYS ro,noload" in lib:
+                raise SystemExit("fallback still claims ro,noload without reading the mount")
+            if "RUN_MOUNT absent" not in lib:
+                raise SystemExit("boot mode does not record that /run is not a mount")
             hook = found.get("usr/share/udhcpc/m4.script", b"")
             if b"same_prefix" not in hook or b"0.0.0.0/0" in hook:
                 raise SystemExit("boot mode dhcp hook is not the on-link route fix")

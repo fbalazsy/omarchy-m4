@@ -5,10 +5,11 @@
 set -eu
 
 say() {
-  printf '%s\n' "$*"
+  printf '%s\n' "$*" || true
   if [ -n "${LOG:-}" ]; then
-    printf '%s\n' "$*" >> "$LOG"
+    printf '%s\n' "$*" >> "$LOG" 2>/dev/null || true
   fi
+  return 0
 }
 
 run_dir() {
@@ -94,7 +95,8 @@ parse_url() {
   M4_PORT=
   M4_PATH=
   url=
-  [ -r /etc/m4diag-url ] && url=$(cat /etc/m4diag-url)
+  urlfile=${M4_URL_FILE:-/etc/m4diag-url}
+  [ -r "$urlfile" ] && url=$(cat "$urlfile")
   case $url in
     http://*) ;;
     *) return 0 ;;
@@ -667,15 +669,53 @@ mount_ro() {
   return 1
 }
 
+mounts_file() {
+  printf '%s\n' "${M4_MOUNTS:-/proc/mounts}"
+}
+
+report_root_mount() {
+  mounts=$(mounts_file)
+  line=$(awk '$2=="/sysroot"{print; exit}' "$mounts" 2>/dev/null || true)
+  if [ -z "$line" ]; then
+    say "ROOT_MOUNT absent"
+    say "ROOT_JOURNAL unread"
+    say "ROOT_EXT4_OPTIONS unread"
+    return 0
+  fi
+  say "ROOT_MOUNT $line"
+  opts=$(printf '%s\n' "$line" | awk '{print $4}')
+  case $opts in
+    *noload*) say "ROOT_JOURNAL noload" ;;
+    *) say "ROOT_JOURNAL no-noload-flag" ;;
+  esac
+  dev=$(printf '%s\n' "$line" | awk '{print $1}')
+  base=${dev##*/}
+  if [ -n "$base" ] && [ -r "/sys/fs/ext4/$base/options" ]; then
+    say "ROOT_EXT4_OPTIONS $(tr '\n' ' ' < "/sys/fs/ext4/$base/options")"
+  else
+    say "ROOT_EXT4_OPTIONS unread"
+  fi
+  case $opts in
+    rw,*) say "ROOT_OBSERVED rw" ;;
+    *noload*) say "ROOT_OBSERVED ro,noload" ;;
+    ro,*) say "ROOT_OBSERVED ro" ;;
+    *) say "ROOT_OBSERVED other" ;;
+  esac
+  return 0
+}
+
 rescue_shell() {
   linker_report || say "LINKER_REPORT_FAIL"
   gadget_report || say "GADGET_REPORT_FAIL"
   wifi_setup || say "WIFI_FAIL"
   start_ssh || say "SSH_START_FAIL"
-  cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true
-  post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || true
+  cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || say "LOG_COPY_FAIL"
+  post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || say "UPLOAD_IGNORED"
   say "HOLD configured init was not started"
-  say "ROOT_STAYS ro,noload"
+  report_root_mount
+  if [ -n "${M4_ASH:-}" ]; then
+    exec "$M4_ASH"
+  fi
   exec /usr/bin/ash
   while :; do sleep 3600; done
 }
@@ -687,8 +727,35 @@ remount_rw() {
     return 0
   fi
   say "MOUNT_RW_FAIL"
-  mount -t ext4 -o ro,noload "$M4_ROOT_DEV" /sysroot || say "MOUNT_RO_AGAIN_FAIL"
+  if mount -t ext4 -o ro,noload "$M4_ROOT_DEV" /sysroot; then
+    say "MOUNT_RO_AGAIN"
+  else
+    say "MOUNT_RO_AGAIN_FAIL"
+  fi
+  report_root_mount
   return 1
+}
+
+prepare_handoff_log() {
+  # Still on the read-only mount. A failure here must not skip the handoff
+  # and must not leave a later read-write mount behind.
+  set +e
+  say "CLASS handoff"
+  say "SWITCH_ROOT_ATTEMPT $initarg"
+  say "LIMIT final exec is irreversible"
+  say "LIMIT no fallback after a successful exec"
+  say "LIMIT this ash exits if switch_root cannot be executed"
+  if awk '$2=="/run"{found=1} END{exit !found}' "$(mounts_file)" 2>/dev/null; then
+    say "RUN_MOUNT present"
+  else
+    say "RUN_MOUNT absent"
+  fi
+  cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || say "LOG_COPY_FAIL"
+  post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || say "UPLOAD_IGNORED"
+  cp "$LOG" "$(run_dir)/m4diag-handoff.body" 2>/dev/null || say "LOG_COPY_FAIL"
+  post_named m4diag-handoff.txt "$(run_dir)/m4diag-handoff.body" || say "UPLOAD_IGNORED"
+  set -e
+  return 0
 }
 
 m4diag_main() {
@@ -751,20 +818,33 @@ m4diag_main() {
     say "SSH_HOLD no-handoff no-rw"
     rescue_shell
   fi
-  if [ "$verified" -eq 1 ] && [ -x /usr/bin/switch_root ] && remount_rw; then
-    say "CLASS handoff"
-    say "SWITCH_ROOT_ATTEMPT $initarg"
-    say "LIMIT final exec is irreversible"
-    say "LIMIT no fallback after this exec"
-    cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true
-    post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || true
-    cp "$LOG" "$(run_dir)/m4diag-handoff.body" 2>/dev/null || true
-    post_named m4diag-handoff.txt "$(run_dir)/m4diag-handoff.body" || true
-    # Packed util-linux switch_root does chdir, MS_MOVE of proc/sys/dev/run,
-    # chroot, then exec. BusyBox ash treats a failed exec as fatal.
-    exec /usr/bin/switch_root /sysroot "$initarg"
+  boot_decision
+  say "CLASS diagnostic-hold"
+  cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || say "LOG_COPY_FAIL"
+  post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || say "UPLOAD_IGNORED"
+  say "HOLD configured init was not started"
+  report_root_mount
+  if [ -n "${M4_ASH:-}" ]; then
+    exec "$M4_ASH"
   fi
-  if [ "$verified" -eq 1 ] && [ ! -x /usr/bin/switch_root ]; then
+  exec /usr/bin/ash
+  while :; do sleep 3600; done
+}
+
+boot_decision() {
+  rootbin=${M4_SWITCH_ROOT:-/usr/bin/switch_root}
+  if [ "$verified" = 1 ] && [ -x "$rootbin" ]; then
+    prepare_handoff_log
+    if remount_rw; then
+      # Uploads already finished while the root was read-only.
+      # This ash does not continue after a failed exec, so there is no
+      # recovery here. The line above the exec says that.
+      if [ -n "${M4_SWITCH_ROOT:-}" ]; then
+        exec "$M4_SWITCH_ROOT" /sysroot "$initarg"
+      fi
+      exec /usr/bin/switch_root /sysroot "$initarg"
+    fi
+  elif [ "$verified" = 1 ]; then
     say "SWITCH_ROOT_ABSENT"
   fi
   if [ "$mode" = "boot" ]; then
@@ -773,11 +853,5 @@ m4diag_main() {
     say "CLASS diagnostic-hold"
     rescue_shell
   fi
-  say "CLASS diagnostic-hold"
-  cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true
-  post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || true
-  say "HOLD configured init was not started"
-  say "ROOT_STAYS ro,noload"
-  exec /usr/bin/ash
-  while :; do sleep 3600; done
+  return 0
 }

@@ -356,7 +356,8 @@ awk '
   /FALLBACK_WIFI pre-exec-only/ { fb = NR }
   END { if (!(ro && sw && fb && ro < sw && sw < fb)) exit 1 }
 ' "$HERE/m4diag-lib.sh"
-grep -q 'no fallback after this exec' "$HERE/m4diag-lib.sh"
+grep -q 'no fallback after a successful exec' "$HERE/m4diag-lib.sh"
+grep -q 'ROOT_STAYS ro,noload' "$HERE/m4diag-lib.sh" && exit 1
 grep -q 'M4_EXEC_INIT' "$HERE/m4diag-lib.sh" && exit 1
 grep -q 'handoff_root' "$HERE/m4diag-lib.sh" && exit 1
 python3 - "$T/m4diag.bin" "$T/rootfs" << 'PY'
