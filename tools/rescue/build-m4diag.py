@@ -278,6 +278,7 @@ def main():
             "no-sbin-init-substitute",
             "root-rw-only-after-verify",
             "script-syntax-only not-a-full-userspace-check",
+            "final-exec-of-switch_root-is-irreversible",
         ])) + "\n"
         files["etc/m4diag-limits"] = (0o100644, limit_text.encode())
         have = {name for name, _, _ in items}

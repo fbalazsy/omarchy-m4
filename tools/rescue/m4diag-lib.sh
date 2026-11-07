@@ -425,45 +425,6 @@ mount_ro() {
   return 1
 }
 
-# util-linux 2.42.4 switch_root execs init and exits the process if that
-# exec fails. Doing the mount move here and execing the verified init
-# keeps this shell as PID 1 when exec returns.
-handoff_root() {
-  init=$1
-  root=${M4_SYSROOT:-/sysroot}
-  for fs in /dev /sys /run /proc; do
-    dest=$root$fs
-    if [ -d "$fs" ] && [ -d "$dest" ]; then
-      mount --move "$fs" "$dest" 2>/dev/null || mount -o move "$fs" "$dest" 2>/dev/null || say "MOVE_FAIL $fs"
-    fi
-  done
-  if ! mount --move "$root" / 2>/dev/null && ! mount -o move "$root" / 2>/dev/null; then
-    say "SWITCH_ROOT_FAIL move"
-    if mount -o remount,ro "$root" 2>/dev/null; then
-      say "MOUNT ro-after-switch-fail"
-    else
-      say "REMOUNT_RO_FAIL"
-    fi
-    return 1
-  fi
-  set +e
-  if [ -n "${M4_EXEC_INIT:-}" ]; then
-    "$M4_EXEC_INIT" "$init"
-    rc=$?
-  else
-    exec "$init"
-    rc=$?
-  fi
-  say "SWITCH_ROOT_FAIL exec $init rc=$rc"
-  if mount -o remount,ro / 2>/dev/null; then
-    say "MOUNT ro-after-switch-fail"
-  else
-    say "REMOUNT_RO_FAIL"
-  fi
-  set -e
-  return 1
-}
-
 remount_rw() {
   umount /sysroot || { say "UMOUNT_FAIL"; return 1; }
   if mount -t ext4 -o rw "$M4_ROOT_DEV" /sysroot; then
@@ -526,20 +487,20 @@ m4diag_main() {
   net_setup
   set -e
   post_named m4diag-start.txt "$(run_dir)/m4diag-start.body"
-  if [ "$verified" -eq 1 ] && remount_rw; then
+  if [ "$verified" -eq 1 ] && [ -x /usr/bin/switch_root ] && remount_rw; then
     say "CLASS handoff"
     say "SWITCH_ROOT_ATTEMPT $initarg"
+    say "LIMIT final exec is irreversible"
     cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true
     post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || true
-    if handoff_root "$initarg"; then
-      :
-    fi
-    say "CLASS diagnostic-hold"
-    say "HOLD switch_root returned. configured init was not started"
     cp "$LOG" "$(run_dir)/m4diag-handoff.body" 2>/dev/null || true
     post_named m4diag-handoff.txt "$(run_dir)/m4diag-handoff.body" || true
-    exec /usr/bin/ash
-    while :; do sleep 3600; done
+    # Packed util-linux switch_root does chdir, MS_MOVE, chroot, then exec.
+    # BusyBox ash treats a failed exec as fatal, so nothing after this runs.
+    exec /usr/bin/switch_root /sysroot "$initarg"
+  fi
+  if [ "$verified" -eq 1 ] && [ ! -x /usr/bin/switch_root ]; then
+    say "SWITCH_ROOT_ABSENT"
   fi
   say "CLASS diagnostic-hold"
   cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true

@@ -246,55 +246,6 @@ out=$(LOG=$T/verify.log M4_RUN=$T/run PATH="$T/bin:$PATH" sh -c '
 ' sh "$HERE/m4diag-lib.sh" "$T/root3")
 printf '%s\n' "$out" | grep -q 'elf-interp-failed'
 printf '%s\n' "$out" | grep -qx 'STILL-ALIVE'
-# switch_root returning must leave the shell alive, remount ro, and not run another init
-cat > "$T/bin/mount" << 'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >> "$MOCK_MOUNT"
-case " $* " in
-  *" --move "*) exit "${MOCK_MOVE_RC:-0}" ;;
-  *" -o move "*) exit "${MOCK_MOVE_RC:-0}" ;;
-  *" remount,ro "*) exit 0 ;;
-esac
-exit 0
-EOF
-chmod 755 "$T/bin/mount"
-cat > "$T/bin/exec-init" << 'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >> "$MOCK_EXEC"
-exit 7
-EOF
-chmod 755 "$T/bin/exec-init"
-: > "$T/mount.log"
-: > "$T/exec.log"
-mkdir -p "$T/sys/dev" "$T/sys/proc" "$T/sys/sys" "$T/sys/run"
-out=$(LOG=$T/verify.log M4_RUN=$T/run M4_SYSROOT=$T/sys PATH="$T/bin:$PATH" \
-  MOCK_MOUNT=$T/mount.log MOCK_EXEC=$T/exec.log M4_EXEC_INIT=$T/bin/exec-init \
-  sh -c '
-    set -eu
-    . "$1"
-    if handoff_root /usr/local/sbin/rover-init; then echo BAD-SUCCESS; exit 1; fi
-    echo STILL-ALIVE
-  ' sh "$HERE/m4diag-lib.sh")
-printf '%s\n' "$out" | grep -q 'SWITCH_ROOT_FAIL exec /usr/local/sbin/rover-init rc=7'
-printf '%s\n' "$out" | grep -q 'MOUNT ro-after-switch-fail'
-printf '%s\n' "$out" | grep -qx 'STILL-ALIVE'
-grep -q '/usr/local/sbin/rover-init' "$T/exec.log"
-grep -q '/sbin/init' "$T/exec.log" && exit 1
-grep -q 'remount,ro' "$T/mount.log"
-# move failure never execs the init
-: > "$T/mount.log"
-: > "$T/exec.log"
-out=$(LOG=$T/verify.log M4_RUN=$T/run M4_SYSROOT=$T/sys PATH="$T/bin:$PATH" \
-  MOCK_MOUNT=$T/mount.log MOCK_EXEC=$T/exec.log MOCK_MOVE_RC=1 M4_EXEC_INIT=$T/bin/exec-init \
-  sh -c '
-    set -eu
-    . "$1"
-    if handoff_root /usr/local/sbin/rover-init; then echo BAD-SUCCESS; exit 1; fi
-    echo STILL-ALIVE
-  ' sh "$HERE/m4diag-lib.sh")
-printf '%s\n' "$out" | grep -q 'SWITCH_ROOT_FAIL move'
-printf '%s\n' "$out" | grep -qx 'STILL-ALIVE'
-[ ! -s "$T/exec.log" ]
 # script text is reported and not executed
 cat > "$T/bin/elf-interp" << EOF
 #!/bin/sh
@@ -350,6 +301,9 @@ grep -q 'm4diag-checks.txt' "$HERE/m4diag-lib.sh"
 grep -q 'm4diag-handoff.txt' "$HERE/m4diag-lib.sh"
 grep -q 'route add default' "$HERE/udhcpc-m4.sh" && exit 1
 grep -q '0.0.0.0/0' "$HERE/udhcpc-m4.sh" && exit 1
+grep -q 'exec /usr/bin/switch_root' "$HERE/m4diag-lib.sh"
+grep -q 'M4_EXEC_INIT' "$HERE/m4diag-lib.sh" && exit 1
+grep -q 'handoff_root' "$HERE/m4diag-lib.sh" && exit 1
 python3 - "$T/m4diag.bin" "$T/rootfs" << 'PY'
 import gzip, io, os, pathlib, shutil, struct, subprocess, sys
 image, rootfs = sys.argv[1:]
@@ -424,6 +378,9 @@ assert "m4diag_main" in init
 assert "switch_root" not in init  # the decision lives in the library
 lib = (root / "usr/bin/m4diag-lib.sh").read_text()
 assert "ro,noload" in lib and "fsck" not in lib
+assert "exec /usr/bin/switch_root" in lib
+assert "M4_EXEC_INIT" not in lib
+assert 'mount --move "$root"' not in lib
 url = (root / "etc/m4diag-url").read_text().strip()
 assert url == "http://192.0.2.25:8616/up"
 fw = (root / "usr/lib/firmware/apple/tpmtfw-j616s.bin").read_bytes()
@@ -456,4 +413,6 @@ assert b[0x10000 + 0x808:0x10000 + 0x808 + 8] == b"AURALOAD"
 assert b"__TEXT_BOOT_EXEC" not in b
 print("macho ok", len(b))
 PY
+echo "m4diag image built"
+"$HERE/test-handoff.sh" "$T/m4diag.macho"
 echo "m4diag tests: all passed"

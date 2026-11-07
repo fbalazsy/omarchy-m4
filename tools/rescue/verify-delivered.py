@@ -98,6 +98,8 @@ def dhcp_case(script, env, expect_ok, expect_line):
 
 
 def main():
+    if subprocess.run(["sh", "-c", "command -v zstd"], capture_output=True).returncode != 0:
+        raise SystemExit("zstd is required (apt install zstd)")
     args = sys.argv[1:]
     if len(args) < 3 or args[1] != "--expect-url":
         raise SystemExit("usage: verify-delivered.py MACHO --expect-url URL [--scripts DIR]")
@@ -128,10 +130,10 @@ def main():
     if mods != MODULES:
         raise SystemExit("module list differs")
     lib = found["usr/bin/m4diag-lib.sh"].decode()
-    if "exec /usr/bin/switch_root" in lib:
-        raise SystemExit("lib still execs switch_root")
-    if "SWITCH_ROOT_FAIL" not in lib or "handoff_root" not in lib:
-        raise SystemExit("lib missing the pid1 handoff catch")
+    if "exec /usr/bin/switch_root" not in lib:
+        raise SystemExit("lib does not exec the packed switch_root")
+    if "M4_EXEC_INIT" in lib or "handoff_root" in lib or 'mount --move "$root"' in lib:
+        raise SystemExit("lib still contains the shell mount-move handoff")
     if "resolve_under" not in lib:
         raise SystemExit("in-root symlink resolver missing")
     line = suffix.split(b"\n", 1)[0]
