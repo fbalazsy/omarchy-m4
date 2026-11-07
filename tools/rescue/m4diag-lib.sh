@@ -1,0 +1,366 @@
+#!/bin/sh
+# PID 1 helpers for the g55obs2 diagnostic handoff.
+# A verified configured init is handed to switch_root. Anything else stays
+# here and prints why. This is not a root-filesystem repair.
+set -eu
+
+say() {
+  printf '%s\n' "$*"
+  if [ -n "${LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$LOG"
+  fi
+}
+
+run_dir() {
+  printf '%s\n' "${M4_RUN:-/run}"
+}
+
+uptime_s() {
+  cut -d. -f1 /proc/uptime 2>/dev/null || echo 0
+}
+
+load_one() {
+  name=$1
+  modprobe "$name" >"$(run_dir)/mp-$name.err" 2>&1 &
+  p=$!
+  i=0
+  while [ "$i" -lt 5 ]; do
+    if ! kill -0 "$p" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  if kill -0 "$p" 2>/dev/null; then
+    kill "$p" 2>/dev/null || true
+    set +e
+    wait "$p"
+    set -e
+    say "MODPROBE $name timeout"
+    return 0
+  fi
+  set +e
+  wait "$p"
+  rc=$?
+  set -e
+  say "MODPROBE $name $rc"
+}
+
+load_list() {
+  phase=$1
+  budget=$2
+  start=$(uptime_s)
+  [ -r /etc/m4diag-modules ] || { say "MODULES_LIST absent"; return 0; }
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case $name in
+      \#*) continue ;;
+    esac
+    is_nvme=0
+    case $name in
+      nvme*) is_nvme=1 ;;
+    esac
+    if [ "$phase" = "early" ] && [ "$is_nvme" -eq 1 ]; then
+      continue
+    fi
+    if [ "$phase" = "nvme" ] && [ "$is_nvme" -eq 0 ]; then
+      continue
+    fi
+    now=$(uptime_s)
+    if [ $((now - start)) -ge "$budget" ]; then
+      say "MODULES_BUDGET $phase"
+      return 0
+    fi
+    load_one "$name"
+  done < /etc/m4diag-modules
+}
+
+parse_url() {
+  M4_HOST=
+  M4_PORT=
+  M4_PATH=
+  url=
+  [ -r /etc/m4diag-url ] && url=$(cat /etc/m4diag-url)
+  case $url in
+    http://*) ;;
+    *) return 0 ;;
+  esac
+  rest=${url#http://}
+  hostport=${rest%%/*}
+  M4_PATH=/${rest#*/}
+  M4_HOST=${hostport%%:*}
+  M4_PORT=${hostport#*:}
+  [ "$M4_PORT" = "$hostport" ] && M4_PORT=80
+  case $M4_HOST in
+    *[!0-9.]*) M4_HOST= ;;
+  esac
+}
+
+net_setup() {
+  parse_url
+  printf '%s\n' "${M4_HOST:-}" > /etc/m4diag-host
+  export M4_TELEMETRY_HOST=${M4_HOST:-}
+  sleep 1
+  found=0
+  i=0
+  seen_list=" "
+  while [ "$i" -lt 8 ]; do
+    for n in /sys/class/net/*; do
+      [ -e "$n" ] || continue
+      base=${n##*/}
+      [ "$base" = "lo" ] && continue
+      drv=$(readlink "$n/device/driver" 2>/dev/null || true)
+      drv=${drv##*/}
+      case $seen_list in
+        *" $base "*) ;;
+        *)
+          seen_list="$seen_list$base "
+          say "NET_SEEN $base ${drv:-none}"
+          ;;
+      esac
+      case ${drv:-} in
+        cdc_ether|cdc_ncm|r8153_ecm) found=$((found + 1)) ;;
+      esac
+    done
+    [ "$found" -gt 0 ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+  used=0
+  for n in /sys/class/net/*; do
+    [ -e "$n" ] || continue
+    base=${n##*/}
+    [ "$base" = "lo" ] && continue
+    [ "$used" -ge 2 ] && break
+    drv=$(readlink "$n/device/driver" 2>/dev/null || true)
+    drv=${drv##*/}
+    case ${drv:-} in
+      cdc_ether|cdc_ncm|r8153_ecm) ;;
+      *) continue ;;
+    esac
+    ip link set "$base" up || say "NET_UP_FAIL $base"
+    j=0
+    carrier=0
+    while [ "$j" -lt 3 ]; do
+      carrier=$(cat "$n/carrier" 2>/dev/null || echo 0)
+      [ "$carrier" = "1" ] && break
+      sleep 1
+      j=$((j + 1))
+    done
+    say "NET $base driver=$drv carrier=${carrier:-0}"
+    used=$((used + 1))
+    if [ "$carrier" = "1" ] && [ -n "${M4_HOST:-}" ]; then
+      set +e
+      udhcpc -n -q -t 2 -T 2 -i "$base" -s /usr/share/udhcpc/m4.script
+      rc=$?
+      set -e
+      say "DHCP $base $rc"
+    else
+      say "DHCP $base skipped"
+    fi
+  done
+  [ "$used" -eq 0 ] && say "NET_DRIVER_NONE"
+}
+
+field() {
+  key=$1
+  file=$2
+  sed -n "s/^${key} //p" "$file" | head -n 1
+}
+
+verify_root_init() {
+  root=$1
+  rel=$2
+  full=$root$rel
+  if [ ! -e "$full" ] && [ ! -L "$full" ]; then
+    say "VERIFY $rel absent"
+    return 1
+  fi
+  resolved=$(readlink -f "$full" 2>/dev/null || printf '%s\n' "$full")
+  say "STAT $rel $(stat -c '%F %a' "$full" 2>/dev/null || echo unstatable)"
+  info=$(run_dir)/m4diag-file.txt
+  elf-interp "$resolved" > "$info"
+  kind=$(field KIND "$info")
+  interp=$(field INTERP "$info")
+  say "FILE $rel kind=$kind interp=${interp:-none}"
+  case $kind in
+    script)
+      [ -n "${interp:-}" ] && [ "$interp" != "none" ] || { say "VERIFY $rel no-shebang"; return 1; }
+      ipath=$root$interp
+      if [ ! -e "$ipath" ] && [ ! -L "$ipath" ]; then
+        say "VERIFY $rel interpreter-absent $interp"
+        return 1
+      fi
+      if [ ! -x "$ipath" ]; then
+        say "VERIFY $rel interpreter-not-executable $interp"
+        return 1
+      fi
+      base=${interp##*/}
+      case $base in
+        bash|sh|ash)
+          set +e
+          chroot "$root" "$interp" -n "${rel#/}" > "$(run_dir)/m4diag-verify.txt" 2>&1
+          rc=$?
+          set -e
+          say "VERIFY $rel script $interp rc=$rc"
+          return "$rc"
+          ;;
+        *)
+          say "VERIFY $rel script $interp exec-bit-only"
+          return 0
+          ;;
+      esac
+      ;;
+    elf)
+      [ -n "${interp:-}" ] && [ "$interp" != "none" ] && [ "$interp" != "unreadable" ] || {
+        say "VERIFY $rel interp-unreadable"
+        return 1
+      }
+      ipath=$root$interp
+      if [ ! -e "$ipath" ] && [ ! -L "$ipath" ]; then
+        say "VERIFY $rel interpreter-absent $interp"
+        return 1
+      fi
+      if [ ! -x "$ipath" ]; then
+        say "VERIFY $rel interpreter-not-executable $interp"
+        return 1
+      fi
+      set +e
+      chroot "$root" "$interp" --list "${rel#/}" > "$(run_dir)/m4diag-verify.txt" 2>&1
+      rc=$?
+      set -e
+      if grep -q "not found" "$(run_dir)/m4diag-verify.txt"; then
+        say "VERIFY $rel elf $interp missing-lib rc=$rc"
+        return 1
+      fi
+      say "VERIFY $rel elf $interp rc=$rc"
+      if [ "$rc" -eq 0 ]; then
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      say "VERIFY $rel not-executable-kind $kind"
+      return 1
+      ;;
+  esac
+}
+
+report_extra() {
+  root=$1
+  for rel in /sbin/init /bin/bash /usr/bin/bash /lib/ld-linux-aarch64.so.1 /usr/lib/ld-linux-aarch64.so.1; do
+    full=$root$rel
+    if [ ! -e "$full" ] && [ ! -L "$full" ]; then
+      say "EXTRA $rel absent"
+      continue
+    fi
+    resolved=$(readlink -f "$full" 2>/dev/null || printf '%s\n' "$full")
+    elf-interp "$resolved" > "$(run_dir)/m4diag-extra.txt"
+    say "EXTRA $rel $(tr '\n' ' ' < "$(run_dir)/m4diag-extra.txt")"
+  done
+}
+
+post_log() {
+  parse_url
+  if [ -z "${M4_HOST:-}" ]; then
+    say "NET_EXPORT skipped"
+    return 0
+  fi
+  len=$(wc -c < "$LOG" | tr -d ' ')
+  set +e
+  {
+    printf 'PUT %s HTTP/1.0\r\nHost: %s\r\nContent-Type: text/plain\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' \
+      "$M4_PATH" "$M4_HOST" "$len"
+    cat "$LOG"
+  } | nc -w 5 "$M4_HOST" "$M4_PORT" > "$(run_dir)/m4diag.http" 2>"$(run_dir)/m4diag.nc"
+  rc=$?
+  set -e
+  status=$(head -n 1 "$(run_dir)/m4diag.http" 2>/dev/null || true)
+  say "NET_EXPORT $rc ${status:-none}"
+}
+
+mount_ro() {
+  rootarg=$1
+  i=0
+  dev=
+  while [ "$i" -lt 8 ]; do
+    dev=$(blkid -t "$rootarg" -o device 2>/dev/null | head -n 1 || true)
+    [ -n "$dev" ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+  say "ROOT_DEV ${dev:-none}"
+  if [ -z "$dev" ]; then
+    return 1
+  fi
+  M4_ROOT_DEV=$dev
+  if mount -t ext4 -o ro,noload "$dev" /sysroot; then
+    say "MOUNT ro,noload $dev"
+    return 0
+  fi
+  say "MOUNT_RO_FAIL $dev"
+  return 1
+}
+
+remount_rw() {
+  umount /sysroot || { say "UMOUNT_FAIL"; return 1; }
+  if mount -t ext4 -o rw "$M4_ROOT_DEV" /sysroot; then
+    say "MOUNT rw"
+    return 0
+  fi
+  say "MOUNT_RW_FAIL"
+  mount -t ext4 -o ro,noload "$M4_ROOT_DEV" /sysroot || say "MOUNT_RO_AGAIN_FAIL"
+  return 1
+}
+
+m4diag_main() {
+  export PATH=/usr/bin:/usr/sbin:/bin:/sbin
+  mkdir -p /run /proc /sys /dev /sysroot /etc
+  mount -t proc proc /proc 2>/dev/null || true
+  mount -t sysfs sysfs /sys 2>/dev/null || true
+  mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+  LOG=$(run_dir)/m4diag.txt
+  : > "$LOG"
+  say "M4DIAG 1"
+  say "UNAME $(uname -a 2>/dev/null || echo none)"
+  say "UNAME_R $(uname -r 2>/dev/null || echo none)"
+  say "CMDLINE $(cat /proc/cmdline 2>/dev/null || echo none)"
+  if [ -r /etc/m4diag-limits ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] && say "LIMIT $line"
+    done < /etc/m4diag-limits
+  fi
+  rel=$(uname -r 2>/dev/null || echo none)
+  if [ ! -e "/lib/modules/$rel/modules.dep" ]; then
+    say "MODULES_DEP_ABSENT $rel"
+  fi
+  load_list early 30
+  net_setup
+  load_list nvme 15
+  initarg=/sbin/init
+  rootarg=
+  for w in $(cat /proc/cmdline 2>/dev/null || true); do
+    case $w in
+      root=*) rootarg=${w#root=} ;;
+      init=*) initarg=${w#init=} ;;
+    esac
+  done
+  say "INIT_ARG $initarg"
+  if [ -z "$rootarg" ] || ! mount_ro "$rootarg"; then
+    say "CLASS diagnostic-hold"
+    post_log || true
+    say "HOLD root was not mounted. configured init was not started"
+    exec /usr/bin/ash
+  fi
+  report_extra /sysroot
+  if verify_root_init /sysroot "$initarg" && remount_rw; then
+    say "CLASS handoff"
+    post_log || true
+    exec /usr/bin/switch_root /sysroot "$initarg"
+    say "SWITCH_ROOT_RETURNED"
+  fi
+  say "CLASS diagnostic-hold"
+  post_log || true
+  say "HOLD configured init was not started"
+  exec /usr/bin/ash
+}

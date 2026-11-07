@@ -1,0 +1,5 @@
+#!/usr/bin/ash
+# g55obs2 PID 1. Loads the matched USB, input and dock-ethernet modules,
+# inspects the root read-only, and hands off only when that init verifies.
+. /usr/bin/m4diag-lib.sh
+m4diag_main
