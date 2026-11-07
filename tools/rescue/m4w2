@@ -1,0 +1,8 @@
+#!/bin/sh
+# 1TR bootstrap for the Wi-Fi hold Mach-O.
+# Set H to the recovery server. Does not reboot. Does not write the ESP.
+set -eu
+H=${H:?set H to the recovery server}
+curl -fsS --max-time 60 -o /tmp/enroll-v2 "$H/enroll-v2"
+curl -fsS --max-time 30 -o /tmp/m4wifi2.pins "$H/m4wifi2.pins"
+exec sh /tmp/enroll-v2 /tmp/m4wifi2.pins
