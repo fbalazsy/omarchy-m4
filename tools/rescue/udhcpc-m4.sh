@@ -98,15 +98,40 @@ if [ -n "${mask:-}" ]; then
   pfx=${pfx:-$mp}
 fi
 [ -n "$pfx" ] || exit 1
+# A zero prefix is a connected default route. Refuse it.
+[ "$pfx" -ge 1 ] && [ "$pfx" -le 32 ] || exit 1
 is_ipv4 "$ip" || exit 1
 is_ipv4 "$host" || exit 1
 
-router_first=${router%% *}
+# An absent router option must not abort the lease.
+router_first=${router-}
+router_first=${router_first%% *}
 case ${router_first:-} in
   '') ;;
   *.*.*.*) is_ipv4 "$router_first" || exit 1 ;;
   *) exit 1 ;;
 esac
+
+# Prints yes when both addresses fall in prefix $3. BusyBox awk has no bitwise and.
+same_prefix() {
+  printf '%s %s %s\n' "$1" "$2" "$3" | awk '
+    function num(s, a) {
+      split(s, a, ".")
+      return a[1] * 16777216 + a[2] * 65536 + a[3] * 256 + a[4]
+    }
+    function pow2(n, r, i) {
+      r = 1
+      for (i = 0; i < n; i++) r = r * 2
+      return r
+    }
+    {
+      p = $3 + 0
+      if (p < 1 || p > 32) exit 1
+      unit = pow2(32 - p)
+      print (int(num($1) / unit) == int(num($2) / unit)) ? "yes" : "no"
+    }
+  '
+}
 
 # Validation finished. Only now is the interface changed.
 if [ -n "${M4_SSH_ADDR_FILE:-}" ]; then
@@ -114,9 +139,13 @@ if [ -n "${M4_SSH_ADDR_FILE:-}" ]; then
 fi
 command ip addr flush dev "$interface" 2>/dev/null || true
 command ip addr add "$ip/$pfx" dev "$interface"
-if [ -n "$router_first" ]; then
-  command ip route replace "$host/32" via "$router_first" dev "$interface"
-else
-  command ip route replace "$host/32" dev "$interface"
+# The connected route covers a peer inside the lease prefix. A /32 via the
+# gateway would send that peer's return traffic to the router.
+peer=$(same_prefix "$ip" "$host" "$pfx") || exit 1
+if [ "$peer" != yes ] && [ -n "$router_first" ]; then
+  gw=$(same_prefix "$ip" "$router_first" "$pfx") || exit 1
+  if [ "$gw" = yes ]; then
+    command ip route replace "$host/32" via "$router_first" dev "$interface"
+  fi
 fi
 exit 0

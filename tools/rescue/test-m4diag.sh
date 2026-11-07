@@ -67,24 +67,66 @@ ln -s "$(command -v busybox)" "$T/bin/awk"
 run_dhcp() {
   : > "$T/log/ip"
   # shellcheck disable=SC2086
-  env LOG=$T/log PATH="$T/bin:$PATH" M4_TELEMETRY_HOST=192.0.2.25 "$@" \
+  env LOG=$T/log PATH="$T/bin:$PATH" "$@" \
     sh "$HERE/udhcpc-m4.sh" bound
 }
-run_dhcp interface=eth0 ip=192.0.2.10 subnet=24 router=192.0.2.1
+no_host_route() {
+  if grep -q 'route ' "$T/log/ip" || grep -q default "$T/log/ip"; then
+    echo "on-link or no-router lease installed a route: $(cat "$T/log/ip")" >&2
+    exit 1
+  fi
+}
+# 192.0.2.10/24 and 192.0.2.25 are one prefix. The connected route is enough.
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=24 router=192.0.2.1 M4_TELEMETRY_HOST=192.0.2.25
 grep -q 'addr add 192.0.2.10/24 dev eth0' "$T/log/ip"
-grep -q 'route replace 192.0.2.25/32 via 192.0.2.1 dev eth0' "$T/log/ip"
-grep -q default "$T/log/ip" && exit 1
+no_host_route
 # BusyBox 1.36.1: subnet is the dotted mask, mask is the prefix.
-run_dhcp interface=eth0 ip=192.0.2.10 subnet=255.255.255.0 mask=24 router=192.0.2.1
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=255.255.255.0 mask=24 router=192.0.2.1 M4_TELEMETRY_HOST=192.0.2.25
 grep -q 'addr flush dev eth0' "$T/log/ip"
 grep -q 'addr add 192.0.2.10/24 dev eth0' "$T/log/ip"
-grep -q 'route replace 192.0.2.25/32 via 192.0.2.1 dev eth0' "$T/log/ip"
-grep -q default "$T/log/ip" && exit 1
-run_dhcp interface=eth0 ip=192.0.2.10 subnet=255.255.255.0 router=192.0.2.1
+no_host_route
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=255.255.255.0 router=192.0.2.1 M4_TELEMETRY_HOST=192.0.2.25
 grep -q 'addr add 192.0.2.10/24 dev eth0' "$T/log/ip"
-# dotted mask only in $mask
-run_dhcp interface=eth0 ip=192.0.2.10 mask=255.255.255.128 router=192.0.2.1
+no_host_route
+# /25: .20 is inside, .200 is outside. The router .1 is inside, so only .200 is via.
+run_dhcp interface=eth0 ip=192.0.2.10 mask=255.255.255.128 router=192.0.2.1 M4_TELEMETRY_HOST=192.0.2.20
 grep -q 'addr add 192.0.2.10/25 dev eth0' "$T/log/ip"
+no_host_route
+run_dhcp interface=eth0 ip=192.0.2.10 mask=255.255.255.128 router=192.0.2.1 M4_TELEMETRY_HOST=192.0.2.200
+grep -q 'route replace 192.0.2.200/32 via 192.0.2.1 dev eth0' "$T/log/ip"
+grep -q default "$T/log/ip" && exit 1
+# /16 stays on-link across the third octet. /23 covers .2.0 through .3.255.
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=16 router=192.0.2.1 M4_TELEMETRY_HOST=192.0.9.9
+grep -q 'addr add 192.0.2.10/16 dev eth0' "$T/log/ip"
+no_host_route
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=23 router=192.0.2.1 M4_TELEMETRY_HOST=192.0.3.10
+no_host_route
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=23 router=192.0.2.1 M4_TELEMETRY_HOST=192.0.4.10
+grep -q 'route replace 192.0.4.10/32 via 192.0.2.1 dev eth0' "$T/log/ip"
+grep -q default "$T/log/ip" && exit 1
+# Off-prefix peer, on-prefix router.
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=24 router=192.0.2.1 M4_TELEMETRY_HOST=198.51.100.8
+grep -q 'route replace 198.51.100.8/32 via 192.0.2.1 dev eth0' "$T/log/ip"
+grep -q default "$T/log/ip" && exit 1
+# No router option: address only, whether or not the peer is on-link.
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=24 M4_TELEMETRY_HOST=192.0.2.25
+grep -q 'addr add 192.0.2.10/24 dev eth0' "$T/log/ip"
+no_host_route
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=24 M4_TELEMETRY_HOST=198.51.100.8
+grep -q 'addr add 192.0.2.10/24 dev eth0' "$T/log/ip"
+no_host_route
+# A router outside the prefix is not a usable next hop. /31 only contains .10 and .11.
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=24 router=198.51.100.1 M4_TELEMETRY_HOST=198.51.100.8
+no_host_route
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=32 router=192.0.2.1 M4_TELEMETRY_HOST=198.51.100.8
+no_host_route
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=31 router=192.0.2.11 M4_TELEMETRY_HOST=192.0.2.11
+no_host_route
+run_dhcp interface=eth0 ip=192.0.2.10 subnet=31 router=192.0.2.11 M4_TELEMETRY_HOST=192.0.2.12
+grep -q 'route replace 192.0.2.12/32 via 192.0.2.11 dev eth0' "$T/log/ip"
+grep -q default "$T/log/ip" && exit 1
+grep -q 'route add default' "$HERE/udhcpc-m4.sh" && exit 1
+grep -q '0.0.0.0/0' "$HERE/udhcpc-m4.sh" && exit 1
 reject_dhcp() {
   : > "$T/log/ip"
   if env LOG=$T/log PATH="$T/bin:$PATH" M4_TELEMETRY_HOST=192.0.2.25 \
@@ -97,11 +139,17 @@ reject_dhcp() {
 reject_dhcp interface=eth0 ip=192.0.2.10 subnet=255.0.255.0 mask=24 router=192.0.2.1
 reject_dhcp interface=eth0 ip=192.0.2.10 subnet=255.255.255.0 mask=23 router=192.0.2.1
 reject_dhcp interface=eth0 ip=192.0.2.10 subnet=33 router=192.0.2.1
+reject_dhcp interface=eth0 ip=192.0.2.10 subnet=0 router=192.0.2.1
+reject_dhcp interface=eth0 ip=192.0.2.10 subnet=0.0.0.0 router=192.0.2.1
 reject_dhcp interface='eth0;ip' ip=192.0.2.10 subnet=24 router=192.0.2.1
 : > "$T/log/ip"
 env LOG=$T/log PATH="$T/bin:$PATH" interface=eth0 ip=192.0.2.10 subnet=255.255.255.0 mask=24 \
   router=192.0.2.1 M4_TELEMETRY_HOST=192.0.2.25 sh "$HERE/udhcpc-m4.sh" deconfig
 [ ! -s "$T/log/ip" ]
+echo "dhcp routes ok"
+if [ -n "${DHCP_ONLY:-}" ]; then
+  exit 0
+fi
 # same dotted-mask case under the embedded client's shell
 python3 - "$TRIAL" << 'PY'
 import pathlib, subprocess, sys
