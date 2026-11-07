@@ -221,6 +221,22 @@ def build_modules(tar_xz, work):
     return stage, names, limits
 
 
+KEY_FP = "SHA256:RZMEqkqy6qfMWyxMHal02W+5U1HxrsOTm8Kw78P6aa4"
+
+
+def load_authorized_key(path):
+    text = pathlib.Path(path).read_text()
+    if "PRIVATE KEY" in text or "\n" in text.strip():
+        raise SystemExit("authorized key must be one public line")
+    line = text.strip()
+    if not line.startswith("ssh-ed25519 "):
+        raise SystemExit("authorized key must be ssh-ed25519")
+    shown = subprocess.run(["ssh-keygen", "-lf", path], capture_output=True, text=True)
+    if shown.returncode != 0 or KEY_FP not in shown.stdout:
+        raise SystemExit("authorized key fingerprint is not the rescue key")
+    return (line + "\n").encode()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("stage2")
@@ -228,8 +244,20 @@ def main():
     parser.add_argument("out")
     parser.add_argument("--telemetry-url", default="")
     parser.add_argument("--firmware", required=True)
+    parser.add_argument("--ssh-hold", action="store_true")
+    parser.add_argument("--authorized-key")
+    parser.add_argument("--dropbear")
     args = parser.parse_args()
     check_url(args.telemetry_url)
+    authorized = b""
+    dropbear = b""
+    if args.ssh_hold:
+        if not args.authorized_key or not args.dropbear:
+            raise SystemExit("ssh-hold needs --authorized-key and --dropbear")
+        authorized = load_authorized_key(args.authorized_key)
+        dropbear = pathlib.Path(args.dropbear).read_bytes()
+        if dropbear[:4] != b"\x7fELF" or b"PRIVATE KEY" in dropbear:
+            raise SystemExit("dropbear is not an ELF")
     firmware = pathlib.Path(args.firmware).read_bytes()
     if len(firmware) != FW_SIZE or hashlib.sha256(firmware).hexdigest() != FW_SHA:
         raise SystemExit("firmware is not tpmtfw-j616s.bin")
@@ -280,6 +308,15 @@ def main():
             "script-syntax-only not-a-full-userspace-check",
             "final-exec-of-switch_root-is-irreversible",
         ])) + "\n"
+        if args.ssh_hold:
+            files["etc/m4diag-ssh"] = (0o100644, b"ro-hold\n")
+            files["etc/m4diag-authorized_keys"] = (0o100600, authorized)
+            files["usr/sbin/dropbearmulti"] = (0o100755, dropbear)
+            if "etc/passwd" not in {name for name, _, _ in items}:
+                files["etc/passwd"] = (0o100644, b"root:x:0:0:root:/root:/bin/sh\n")
+            if "etc/group" not in {name for name, _, _ in items}:
+                files["etc/group"] = (0o100644, b"root:x:0:\n")
+            limit_text = limit_text + "ssh-ro-hold-no-autohandoff\nusb-gadget-no-udc-in-this-kernel\n"
         files["etc/m4diag-limits"] = (0o100644, limit_text.encode())
         have = {name for name, _, _ in items}
         merged = []

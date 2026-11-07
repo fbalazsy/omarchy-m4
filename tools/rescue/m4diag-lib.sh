@@ -114,6 +114,7 @@ net_setup() {
   parse_url
   printf '%s\n' "${M4_HOST:-}" > /etc/m4diag-host
   export M4_TELEMETRY_HOST=${M4_HOST:-}
+  export M4_SSH_ADDR_FILE=$(run_dir)/m4ssh.addr
   sleep 1
   found=0
   i=0
@@ -402,6 +403,100 @@ post_named() {
   return 0
 }
 
+linker_report() {
+  root=/sysroot
+  if ! mountpoint -q "$root" 2>/dev/null; then
+    if [ ! -d "$root/bin" ] && [ ! -d "$root/usr" ]; then
+      say "LINKER root-not-mounted"
+      return 0
+    fi
+  fi
+  if [ -L "$root/lib" ]; then
+    say "LINKER_LIB symlink $(readlink "$root/lib" 2>/dev/null || echo unread)"
+  elif [ -d "$root/lib" ]; then
+    say "LINKER_LIB directory"
+  else
+    say "LINKER_LIB absent"
+  fi
+  for rel in /lib/ld-linux-aarch64.so.1 /usr/lib/ld-linux-aarch64.so.1 /bin/bash /usr/local/sbin/rover-init; do
+    if [ -e "$root$rel" ] || [ -L "$root$rel" ]; then
+      if [ -x "$root$rel" ]; then
+        say "LINKER_PATH $rel executable"
+      else
+        say "LINKER_PATH $rel present-not-executable"
+      fi
+    else
+      say "LINKER_PATH $rel absent"
+    fi
+  done
+  if [ -e "$root/bin/bash" ] || [ -L "$root/bin/bash" ]; then
+    if resolved=$(resolve_under "$root" /bin/bash 2>/dev/null); then
+      elf-interp "$root$resolved" > "$(run_dir)/m4diag-bash.txt" 2>/dev/null || true
+      say "LINKER_BASH $(tr '\n' ' ' < "$(run_dir)/m4diag-bash.txt" 2>/dev/null || echo unread)"
+    fi
+  fi
+  return 0
+}
+
+gadget_report() {
+  found=0
+  if [ -d /sys/class/udc ]; then
+    for u in /sys/class/udc/*; do
+      [ -e "$u" ] || continue
+      found=1
+      say "UDC ${u##*/}"
+    done
+  fi
+  if [ "$found" -eq 0 ]; then
+    say "USB_GADGET_UNSUPPORTED no-udc"
+    say "USB_GADGET_REASON dwc3-apple probe sets device-mode off; CONFIG_USB_GADGET unset; CONFIG_USB_DWC3_HOST=y"
+  fi
+  return 0
+}
+
+start_ssh() {
+  if [ ! -s /etc/m4diag-authorized_keys ]; then
+    say "SSH_NO_KEY"
+    return 0
+  fi
+  if [ ! -x /usr/sbin/dropbearmulti ]; then
+    say "SSH_NO_SERVER"
+    return 0
+  fi
+  mkdir -p /root/.ssh "$(run_dir)" || { say "SSH_DIR_FAIL"; return 0; }
+  cp /etc/m4diag-authorized_keys /root/.ssh/authorized_keys || { say "SSH_KEY_COPY_FAIL"; return 0; }
+  chmod 700 /root /root/.ssh || true
+  chmod 600 /root/.ssh/authorized_keys || true
+  if ! /usr/sbin/dropbearmulti dropbearkey -t ed25519 -f "$(run_dir)/dropbear_ed25519_host_key" > "$(run_dir)/dropbearkey.out" 2>&1; then
+    say "SSH_HOSTKEY_FAIL"
+    return 0
+  fi
+  addr=
+  if [ -s "$(run_dir)/m4ssh.addr" ]; then
+    addr=$(head -n 1 "$(run_dir)/m4ssh.addr")
+  fi
+  case $addr in
+    *.*.*.*) ;;
+    *) say "SSH_NO_ADDRESS"; return 0 ;;
+  esac
+  /usr/sbin/dropbearmulti dropbear -j -k -r "$(run_dir)/dropbear_ed25519_host_key" -p "$addr:22" -P "$(run_dir)/dropbear.pid" > "$(run_dir)/dropbear.out" 2>&1 &
+  p=$!
+  i=0
+  while [ "$i" -lt 3 ]; do
+    if [ -s "$(run_dir)/dropbear.pid" ]; then
+      say "SSH_LISTEN $addr:22"
+      return 0
+    fi
+    if ! child_ok "$p" || ! kill -0 "$p" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  say "SSH_LISTEN_FAIL"
+  return 0
+}
+
 mount_ro() {
   rootarg=$1
   i=0
@@ -487,6 +582,19 @@ m4diag_main() {
   net_setup
   set -e
   post_named m4diag-start.txt "$(run_dir)/m4diag-start.body"
+  if [ -f /etc/m4diag-ssh ] && grep -qx ro-hold /etc/m4diag-ssh; then
+    say "CLASS diagnostic-hold"
+    say "SSH_HOLD no-handoff no-rw"
+    linker_report || say "LINKER_REPORT_FAIL"
+    gadget_report || say "GADGET_REPORT_FAIL"
+    start_ssh || say "SSH_START_FAIL"
+    cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true
+    post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || true
+    say "HOLD configured init was not started"
+    say "ROOT_STAYS ro,noload"
+    exec /usr/bin/ash
+    while :; do sleep 3600; done
+  fi
   if [ "$verified" -eq 1 ] && [ -x /usr/bin/switch_root ] && remount_rw; then
     say "CLASS handoff"
     say "SWITCH_ROOT_ATTEMPT $initarg"

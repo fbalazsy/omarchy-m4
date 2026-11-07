@@ -109,6 +109,9 @@ case ${router_first:-} in
 esac
 
 # Validation finished. Only now is the interface changed.
+if [ -n "${M4_SSH_ADDR_FILE:-}" ]; then
+  printf '%s\n' "$ip" > "$M4_SSH_ADDR_FILE" || true
+fi
 command ip addr flush dev "$interface" 2>/dev/null || true
 command ip addr add "$ip/$pfx" dev "$interface"
 if [ -n "$router_first" ]; then
