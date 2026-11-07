@@ -137,8 +137,9 @@ def main():
     if "resolve_under" not in lib:
         raise SystemExit("in-root symlink resolver missing")
     if "etc/m4diag-ssh" in found:
-        if found["etc/m4diag-ssh"].strip() != b"ro-hold":
-            raise SystemExit("ssh mode is not ro-hold")
+        ssh_mode = found["etc/m4diag-ssh"].strip()
+        if ssh_mode not in (b"ro-hold", b"boot"):
+            raise SystemExit("ssh mode is not ro-hold or boot")
         if b"USB_GADGET_UNSUPPORTED" not in lib.encode():
             raise SystemExit("gadget refusal is not logged")
         key = found["etc/m4diag-authorized_keys"]
@@ -146,7 +147,15 @@ def main():
             raise SystemExit("authorized keys file is not one public line")
         if not found.get("usr/sbin/dropbearmulti", b"").startswith(b"\x7fELF"):
             raise SystemExit("dropbear missing")
-        print("SSH_HOLD ro-hold")
+        if ssh_mode == b"ro-hold":
+            print("SSH_HOLD ro-hold")
+        else:
+            if "FALLBACK_WIFI pre-exec-only" not in lib or "no fallback after this exec" not in lib:
+                raise SystemExit("boot mode does not keep the pre-exec fallback")
+            hook = found.get("usr/share/udhcpc/m4.script", b"")
+            if b"same_prefix" not in hook or b"0.0.0.0/0" in hook:
+                raise SystemExit("boot mode dhcp hook is not the on-link route fix")
+            print("BOOT_NORMAL")
     wifi_bin = "usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel.bin"
     if wifi_bin in found:
         wifi_sha = {

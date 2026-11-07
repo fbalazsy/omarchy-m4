@@ -667,6 +667,19 @@ mount_ro() {
   return 1
 }
 
+rescue_shell() {
+  linker_report || say "LINKER_REPORT_FAIL"
+  gadget_report || say "GADGET_REPORT_FAIL"
+  wifi_setup || say "WIFI_FAIL"
+  start_ssh || say "SSH_START_FAIL"
+  cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true
+  post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || true
+  say "HOLD configured init was not started"
+  say "ROOT_STAYS ro,noload"
+  exec /usr/bin/ash
+  while :; do sleep 3600; done
+}
+
 remount_rw() {
   umount /sysroot || { say "UMOUNT_FAIL"; return 1; }
   if mount -t ext4 -o rw "$M4_ROOT_DEV" /sysroot; then
@@ -729,34 +742,36 @@ m4diag_main() {
   net_setup
   set -e
   post_named m4diag-start.txt "$(run_dir)/m4diag-start.body"
-  if [ -f /etc/m4diag-ssh ] && grep -qx ro-hold /etc/m4diag-ssh; then
+  mode=
+  if [ -f /etc/m4diag-ssh ]; then
+    mode=$(tr -d ' \t\r\n' < /etc/m4diag-ssh)
+  fi
+  if [ "$mode" = "ro-hold" ]; then
     say "CLASS diagnostic-hold"
     say "SSH_HOLD no-handoff no-rw"
-    linker_report || say "LINKER_REPORT_FAIL"
-    gadget_report || say "GADGET_REPORT_FAIL"
-    wifi_setup || say "WIFI_FAIL"
-    start_ssh || say "SSH_START_FAIL"
-    cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true
-    post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || true
-    say "HOLD configured init was not started"
-    say "ROOT_STAYS ro,noload"
-    exec /usr/bin/ash
-    while :; do sleep 3600; done
+    rescue_shell
   fi
   if [ "$verified" -eq 1 ] && [ -x /usr/bin/switch_root ] && remount_rw; then
     say "CLASS handoff"
     say "SWITCH_ROOT_ATTEMPT $initarg"
     say "LIMIT final exec is irreversible"
+    say "LIMIT no fallback after this exec"
     cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true
     post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || true
     cp "$LOG" "$(run_dir)/m4diag-handoff.body" 2>/dev/null || true
     post_named m4diag-handoff.txt "$(run_dir)/m4diag-handoff.body" || true
-    # Packed util-linux switch_root does chdir, MS_MOVE, chroot, then exec.
-    # BusyBox ash treats a failed exec as fatal, so nothing after this runs.
+    # Packed util-linux switch_root does chdir, MS_MOVE of proc/sys/dev/run,
+    # chroot, then exec. BusyBox ash treats a failed exec as fatal.
     exec /usr/bin/switch_root /sysroot "$initarg"
   fi
   if [ "$verified" -eq 1 ] && [ ! -x /usr/bin/switch_root ]; then
     say "SWITCH_ROOT_ABSENT"
+  fi
+  if [ "$mode" = "boot" ]; then
+    say "HANDOFF_PRE_EXEC_FAIL"
+    say "FALLBACK_WIFI pre-exec-only"
+    say "CLASS diagnostic-hold"
+    rescue_shell
   fi
   say "CLASS diagnostic-hold"
   cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true

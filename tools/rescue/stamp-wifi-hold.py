@@ -186,9 +186,13 @@ def depmod_tree(items, kos, builtin, modinfo):
 
 
 def main():
-    if len(sys.argv) != 9:
-        raise SystemExit("usage: stamp-wifi-hold.py RAW KEY DROPBEAR WPA WPA_CLI FW_ZIP MOD_ZIP OUT")
-    raw_path, key_path, dropbear_path, wpa_path, wpa_cli_path, fw_zip, mod_zip, out_path = sys.argv[1:]
+    if len(sys.argv) == 9:
+        mode = b"ro-hold\n"
+    elif len(sys.argv) == 10 and sys.argv[9] == "boot":
+        mode = b"boot\n"
+    else:
+        raise SystemExit("usage: stamp-wifi-hold.py RAW KEY DROPBEAR WPA WPA_CLI FW_ZIP MOD_ZIP OUT [boot]")
+    raw_path, key_path, dropbear_path, wpa_path, wpa_cli_path, fw_zip, mod_zip, out_path = sys.argv[1:9]
     raw = pathlib.Path(raw_path).read_bytes()
     if len(raw) != BASE_LEN or hashlib.sha256(raw).hexdigest() != BASE_SHA:
         raise SystemExit("raw is not the proven m4diag image")
@@ -220,7 +224,7 @@ def main():
         "usr/bin/nm-wifi.awk": (0o100644, (here / "nm-wifi.awk").read_bytes()),
         "usr/bin/nm-wifi.sh": (0o100755, (here / "nm-wifi.sh").read_bytes()),
         "usr/share/udhcpc/m4.script": (0o100755, (here / "udhcpc-m4.sh").read_bytes()),
-        "etc/m4diag-ssh": (0o100644, b"ro-hold\n"),
+        "etc/m4diag-ssh": (0o100644, mode),
         "etc/m4diag-authorized_keys": (0o100600, authorized),
         "etc/m4diag-wifi-modules": (0o100644, WIFI_LIST),
         "usr/sbin/dropbearmulti": (0o100755, dropbear),
@@ -241,6 +245,8 @@ def main():
         files["etc/group"] = (0o100644, b"root:x:0:\n")
     limits = next((blob for name, _, blob in items if name == "etc/m4diag-limits"), b"")
     extra = b"wifi-fw-uncompressed-hostomel\nwifi-credentials-runtime-nm-only\nno-psk-in-logs\n"
+    if mode == b"boot\n":
+        extra += b"normal-boot-same-kernel\npre-exec-wifi-fallback\nno-fallback-after-switch_root\n"
     if extra not in limits:
         files["etc/m4diag-limits"] = (0o100644, limits + extra)
     merged = []

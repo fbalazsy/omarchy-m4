@@ -350,6 +350,13 @@ grep -q 'm4diag-handoff.txt' "$HERE/m4diag-lib.sh"
 grep -q 'route add default' "$HERE/udhcpc-m4.sh" && exit 1
 grep -q '0.0.0.0/0' "$HERE/udhcpc-m4.sh" && exit 1
 grep -q 'exec /usr/bin/switch_root' "$HERE/m4diag-lib.sh"
+awk '
+  /mode" = "ro-hold"/ { ro = NR }
+  /exec \/usr\/bin\/switch_root/ { sw = NR }
+  /FALLBACK_WIFI pre-exec-only/ { fb = NR }
+  END { if (!(ro && sw && fb && ro < sw && sw < fb)) exit 1 }
+' "$HERE/m4diag-lib.sh"
+grep -q 'no fallback after this exec' "$HERE/m4diag-lib.sh"
 grep -q 'M4_EXEC_INIT' "$HERE/m4diag-lib.sh" && exit 1
 grep -q 'handoff_root' "$HERE/m4diag-lib.sh" && exit 1
 python3 - "$T/m4diag.bin" "$T/rootfs" << 'PY'

@@ -23,7 +23,15 @@ if [ ! -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
 fi
 
 T=$(mktemp -d)
-trap 'sudo rm -rf "$T" /tmp/handoff-initramfs-only' EXIT
+cleanup() {
+  if findmnt -R -n "$T" 2>/dev/null | grep -q .; then
+    echo "refusing to remove mounted $T" >&2
+    return
+  fi
+  sudo rm -rf "$T"
+  rm -f /tmp/NOT-THE-NEW-ROOT
+}
+trap cleanup EXIT
 python3 - "$IMAGE" "$T/sys" << 'PY'
 import pathlib, struct, subprocess, sys
 image, dest = sys.argv[1:]
@@ -101,10 +109,19 @@ cat > "$NR/init" << 'EOF'
   printf 'MARK %s\n' "$mark"
   if [ -e /tmp/NOT-THE-NEW-ROOT ]; then printf 'LEAK yes\n'; else printf 'LEAK no\n'; fi
   if [ -d /proc/1 ]; then printf 'PROC yes\n'; else printf 'PROC no\n'; fi
-  if [ -d /sys ]; then printf 'SYS yes\n'; else printf 'SYS no\n'; fi
+  if [ -d /sys/class ]; then printf 'SYS yes\n'; else printf 'SYS no\n'; fi
   if [ -d /dev ]; then printf 'DEV yes\n'; else printf 'DEV no\n'; fi
   if [ -c /dev/console ]; then printf 'CONSOLE char\n'; else printf 'CONSOLE no\n'; fi
   if [ -x /bin/busybox ]; then printf 'BUSYBOX packed\n'; else printf 'BUSYBOX missing\n'; fi
+  while read -r src mnt fst rest; do
+    case $mnt in
+      /proc) printf 'MOUNTPROC %s %s\n' "$src" "$fst" ;;
+      /sys) printf 'MOUNTSYS %s %s\n' "$src" "$fst" ;;
+      /dev) printf 'MOUNTDEV %s %s\n' "$src" "$fst" ;;
+    esac
+  done < /proc/mounts
+  tr '\0' ' ' < /proc/1/cmdline
+  printf '\nARGV %s\n' "$0"
 } > /proof/result
 exit 0
 EOF
@@ -150,4 +167,8 @@ grep -qx 'SYS yes' "$result"
 grep -qx 'DEV yes' "$result"
 grep -qx 'CONSOLE char' "$result"
 grep -qx 'BUSYBOX packed' "$result"
+grep -qx 'MOUNTPROC proc proc' "$result"
+grep -qx 'MOUNTSYS sysfs sysfs' "$result"
+grep -qx 'MOUNTDEV devtmpfs devtmpfs' "$result"
+grep -qx 'ARGV /init' "$result"
 echo "handoff proof ok"
