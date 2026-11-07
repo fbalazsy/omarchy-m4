@@ -147,6 +147,43 @@ def main():
         if not found.get("usr/sbin/dropbearmulti", b"").startswith(b"\x7fELF"):
             raise SystemExit("dropbear missing")
         print("SSH_HOLD ro-hold")
+    wifi_bin = "usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel.bin"
+    if wifi_bin in found:
+        wifi_sha = {
+            wifi_bin: "8b18acb6116622c6161de80ef510dfa9afc47dd963440f090770e57d14b3e928",
+            "usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel.clm_blob":
+                "fe969bc12cabe622ec493f0903dff1ea3d6c9ba3d1e6f433615c26e9eba8b491",
+            "usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel.sig":
+                "a772cc7ae1d7893b71476c7f79b6746a2a504b1c3a9daa14502c2aab74759710",
+            "usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel.txcap_blob":
+                "8797b79bafc5936468c33d2b3f02edc245c8b2f782da64324984b6dc72ef0a5f",
+            "usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel-WLMT-a.txt":
+                "5774de6da1e0331ec269f656752d0c2cb9363e3f12d281b9a517dd203fb05f31",
+            "usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel-WLMT-u.txt":
+                "d665bb8474c13afd39bad3bd0e0752e72dafcc0ea291f7dee330cc85468eea1e",
+        }
+        for fw_name, fw_digest in wifi_sha.items():
+            fw_blob = found[fw_name]
+            if fw_blob.startswith(b"\x28\xb5\x2f\xfd") or hashlib.sha256(fw_blob).hexdigest() != fw_digest:
+                raise SystemExit("wifi firmware missing or compressed")
+        link = found.get("usr/lib/firmware/brcm/brcmfmac4388c2-pcie.apple,hostomel.bin", b"")
+        if link != b"brcmfmac4388c0-pcie.apple,hostomel.bin":
+            raise SystemExit("c2 firmware is not a relative symlink to c0")
+        for leaf in ("cfg80211.ko.zst", "brcmutil.ko.zst", "brcmfmac.ko.zst",
+                     "brcmfmac-cyw.ko.zst", "brcmfmac-wcc.ko.zst", "brcmfmac-bca.ko.zst"):
+            if not any(name.endswith("/" + leaf) for name in found):
+                raise SystemExit(f"wifi module {leaf} missing")
+        dep = found[f"usr/lib/modules/{RELEASE}/modules.dep"].decode()
+        if "brcmfmac.ko" not in dep or "cfg80211.ko" not in dep:
+            raise SystemExit("modules.dep does not include wifi")
+        if not found.get("usr/sbin/wpa_supplicant", b"").startswith(b"\x7fELF"):
+            raise SystemExit("wpa_supplicant missing")
+        if b"wifi_setup" not in lib.encode() or b"WIFI_FIRMWARE_ABSENT" not in lib.encode():
+            raise SystemExit("wifi hold is not in the init")
+        for name in ("usr/bin/m4diag-lib.sh", "usr/bin/nm-wifi.awk", "usr/bin/nm-wifi.sh"):
+            if b"fixture-psk" in found.get(name, b"") or b"PRIVATE KEY" in found.get(name, b""):
+                raise SystemExit("wifi script contains a secret marker")
+        print("WIFI_HOLD hostomel")
     line = suffix.split(b"\n", 1)[0]
     if b"init=/usr/local/sbin/rover-init" not in line or b"noresume" not in line:
         raise SystemExit("bootargs init/noresume missing")

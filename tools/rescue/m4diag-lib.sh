@@ -454,6 +454,146 @@ gadget_report() {
   return 0
 }
 
+wifi_setup() {
+  fw="/usr/lib/firmware/brcm/brcmfmac4388c0-pcie.apple,hostomel.bin"
+  if [ ! -s "$fw" ]; then
+    say "WIFI_FIRMWARE_ABSENT"
+    return 0
+  fi
+  if [ ! -r /etc/m4diag-wifi-modules ]; then
+    say "WIFI_MODULES_LIST_ABSENT"
+    return 0
+  fi
+  board=
+  bfile=/proc/device-tree/pcie@1cb0000000/pci@0,0/wifi@0,0/brcm,board-type
+  if [ -r "$bfile" ]; then
+    board=$(tr -d '\000\n' < "$bfile" 2>/dev/null || true)
+  fi
+  case $board in
+    apple,hostomel) say "WIFI_BOARD dt-hostomel" ;;
+    "") say "WIFI_BOARD absent"; return 0 ;;
+    *) say "WIFI_BOARD unexpected"; return 0 ;;
+  esac
+  if [ -L "/usr/lib/firmware/brcm/brcmfmac4388c2-pcie.apple,hostomel.bin" ]; then
+    say "WIFI_FW_C2_LINK present"
+  else
+    say "WIFI_FW_C2_LINK absent"
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case $name in
+      \#*) continue ;;
+    esac
+    load_one "$name"
+  done < /etc/m4diag-wifi-modules
+  for t in /sys/class/rfkill/*/type; do
+    [ -r "$t" ] || continue
+    typ=$(cat "$t" 2>/dev/null || true)
+    if [ "$typ" = "wlan" ] || [ "$typ" = "wifi" ]; then
+      echo 0 > "${t%type}soft" 2>/dev/null || true
+    fi
+  done
+  say "WIFI_RFKILL checked"
+  iface=
+  i=0
+  while [ "$i" -lt 10 ]; do
+    for n in /sys/class/net/wlan*; do
+      [ -e "$n" ] || continue
+      iface=${n##*/}
+      break
+    done
+    [ -n "$iface" ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ -z "$iface" ]; then
+    say "WIFI_NO_IFACE"
+    return 0
+  fi
+  say "WIFI_IFACE $iface"
+  if [ ! -x /usr/sbin/wpa_supplicant ] || [ ! -r /usr/bin/nm-wifi.awk ] || [ ! -r /usr/bin/nm-wifi.sh ]; then
+    say "WIFI_SUPPLICANT_ABSENT"
+    return 0
+  fi
+  if [ ! -d /sysroot/etc/NetworkManager/system-connections ]; then
+    say "WIFI_NO_PROFILE"
+    return 0
+  fi
+  # shellcheck disable=SC1091
+  . /usr/bin/nm-wifi.sh
+  rund=$(run_dir)/m4wifi
+  mkdir -p "$rund"
+  nm_wifi_select /sysroot/etc/NetworkManager/system-connections "$rund" > "$rund/select" || true
+  while IFS= read -r line; do
+    case $line in
+      WIFI_*) say "$line" ;;
+      REJECT\ *) say "WIFI_$line" ;;
+    esac
+  done < "$rund/select"
+  saved=
+  if [ -s "$(run_dir)/m4ssh.addr" ]; then
+    saved=$(head -n 1 "$(run_dir)/m4ssh.addr")
+  fi
+  rm -f "$(run_dir)/m4ssh.addr"
+  got=0
+  while IFS= read -r _try nslot; do
+    conf="$rund/$nslot.conf"
+    meta="$rund/$nslot.meta"
+    [ -f "$conf" ] || continue
+    want=$(awk '$1=="iface"{print $2; exit}' "$meta" 2>/dev/null || true)
+    if [ -n "$want" ] && [ "$want" != "$iface" ]; then
+      say "WIFI_SKIP iface"
+      continue
+    fi
+    if [ -f "$rund/wpa.pid" ]; then
+      kill "$(cat "$rund/wpa.pid" 2>/dev/null)" 2>/dev/null || true
+      rm -f "$rund/wpa.pid"
+    fi
+    mkdir -p "$rund/ctrl"
+    if ! /usr/sbin/wpa_supplicant -B -qq -i "$iface" -c "$conf" -P "$rund/wpa.pid" >/dev/null 2>&1; then
+      say "WIFI_SUPPLICANT_FAIL"
+      continue
+    fi
+    state=
+    j=0
+    while [ "$j" -lt 20 ]; do
+      state=$(/usr/sbin/wpa_cli -p "$rund/ctrl" -i "$iface" status 2>/dev/null | awk -F= '$1=="wpa_state"{print $2; exit}')
+      [ "$state" = "COMPLETED" ] && break
+      sleep 1
+      j=$((j + 1))
+    done
+    if [ "$state" != "COMPLETED" ]; then
+      say "WIFI_ASSOC_FAIL"
+      if [ -s "$rund/wpa.pid" ]; then
+        kill "$(cat "$rund/wpa.pid")" 2>/dev/null || true
+      fi
+      continue
+    fi
+    say "WIFI_ASSOCIATED"
+    set +e
+    udhcpc -n -q -t 3 -T 3 -i "$iface" -s /usr/share/udhcpc/m4.script
+    rc=$?
+    set -e
+    say "WIFI_DHCP $rc"
+    if [ -s "$(run_dir)/m4ssh.addr" ]; then
+      say "WIFI_ADDRESS_READY"
+      got=1
+      break
+    fi
+    say "WIFI_NO_ADDRESS"
+    if [ -s "$rund/wpa.pid" ]; then
+      kill "$(cat "$rund/wpa.pid")" 2>/dev/null || true
+    fi
+  done << EOF
+$(awk '$1=="WIFI_TRY"{print $2 " " $3}' "$rund/select" 2>/dev/null || true)
+EOF
+  if [ "$got" -eq 0 ] && [ -n "$saved" ]; then
+    printf '%s\n' "$saved" > "$(run_dir)/m4ssh.addr"
+    say "WIFI_KEPT_OTHER_ADDRESS"
+  fi
+  return 0
+}
+
 start_ssh() {
   if [ ! -s /etc/m4diag-authorized_keys ]; then
     say "SSH_NO_KEY"
@@ -587,6 +727,7 @@ m4diag_main() {
     say "SSH_HOLD no-handoff no-rw"
     linker_report || say "LINKER_REPORT_FAIL"
     gadget_report || say "GADGET_REPORT_FAIL"
+    wifi_setup || say "WIFI_FAIL"
     start_ssh || say "SSH_START_FAIL"
     cp "$LOG" "$(run_dir)/m4diag-checks.body" 2>/dev/null || true
     post_named m4diag-checks.txt "$(run_dir)/m4diag-checks.body" || true
